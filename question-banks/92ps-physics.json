@@ -1,0 +1,102 @@
+[
+  {
+    "q": "What is the SI unit of force?",
+    "o": ["Joule", "Newton", "Watt", "Pascal"],
+    "a": 1
+  },
+  {
+    "q": "Which of Newton's laws explains why a seatbelt is needed in a crash?",
+    "o": ["First Law - inertia", "Second Law - F=ma", "Third Law - action/reaction", "Law of gravitation"],
+    "a": 0
+  },
+  {
+    "q": "A car accelerates from 0 to 20 m/s in 5 seconds. What is its acceleration?",
+    "o": ["2 m/s²", "4 m/s²", "5 m/s²", "10 m/s²"],
+    "a": 1
+  },
+  {
+    "q": "Which type of energy is stored in a stretched elastic band?",
+    "o": ["Kinetic energy", "Elastic potential energy", "Thermal energy", "Chemical energy"],
+    "a": 1
+  },
+  {
+    "q": "What happens to the total energy in a closed system?",
+    "o": ["It increases over time", "It decreases over time", "It stays constant (conservation of energy)", "It disappears"],
+    "a": 2
+  },
+  {
+    "q": "Why does a heavier object NOT fall faster than a lighter object in a vacuum?",
+    "o": ["Because air resistance cancels out mass differences", "Because gravitational acceleration is the same for all masses", "Because heavier objects have less inertia", "Because mass affects speed but not acceleration"],
+    "a": 1
+  },
+  {
+    "q": "Which best describes how sound waves travel?",
+    "o": ["As transverse waves through a vacuum", "As longitudinal waves through a medium", "As electromagnetic waves through any material", "As standing waves only in solids"],
+    "a": 1
+  },
+  {
+    "q": "What is the relationship between voltage, current and resistance (Ohm's Law)?",
+    "o": ["V = I / R", "V = I × R", "V = R / I", "I = V × R"],
+    "a": 1
+  },
+  {
+    "q": "In a series circuit, what happens to the current at different points?",
+    "o": ["It increases through each component", "It decreases through each component", "It stays the same throughout the circuit", "It depends on the resistance of each component"],
+    "a": 2
+  },
+  {
+    "q": "Which best explains why a metal spoon feels colder than a wooden spoon at the same temperature?",
+    "o": ["Metal is naturally colder than wood", "Metal conducts heat away from your hand faster than wood", "Wood absorbs heat from the air", "Metal has a lower temperature than wood"],
+    "a": 1
+  },
+  {
+    "q": "What type of electromagnetic wave has the shortest wavelength?",
+    "o": ["Radio waves", "Infrared", "Visible light", "Gamma rays"],
+    "a": 3
+  },
+  {
+    "q": "How does increasing the frequency of a wave affect its energy?",
+    "o": ["Energy decreases as frequency increases", "Energy increases as frequency increases", "Energy is unrelated to frequency", "Energy only depends on wavelength, not frequency"],
+    "a": 1
+  },
+  {
+    "q": "Which statement correctly describes potential and kinetic energy of a pendulum at its highest point?",
+    "o": ["Maximum kinetic energy, minimum potential energy", "Maximum potential energy, minimum kinetic energy", "Both are at maximum", "Both are zero"],
+    "a": 1
+  },
+  {
+    "q": "What is the main difference between mass and weight?",
+    "o": ["Mass and weight are the same thing", "Mass is a force, weight is measured in kg", "Mass measures matter, weight is the force of gravity on that matter", "Weight is constant everywhere in the universe"],
+    "a": 2
+  },
+  {
+    "q": "Why do objects in orbit appear weightless?",
+    "o": ["Because there is no gravity in space", "Because they are continuously falling around the Earth", "Because gravity switches off at high altitude", "Because they are moving too fast for gravity to act"],
+    "a": 1
+  },
+  {
+    "q": "Which best describes the process of refraction?",
+    "o": ["Light bouncing off a surface", "Light bending as it passes between different media", "Light splitting into a spectrum of colours", "Light being absorbed by a dark object"],
+    "a": 1
+  },
+  {
+    "q": "A wave has a wavelength of 2m and a frequency of 5Hz. What is its speed?",
+    "o": ["2.5 m/s", "7 m/s", "10 m/s", "0.4 m/s"],
+    "a": 2
+  },
+  {
+    "q": "Which of the following is an example of a non-renewable energy resource?",
+    "o": ["Solar power", "Wind power", "Coal", "Hydroelectric power"],
+    "a": 2
+  },
+  {
+    "q": "How does insulation reduce heat loss from a house?",
+    "o": ["By reflecting all light away from the house", "By trapping air, which is a poor conductor of heat", "By generating heat within the walls", "By increasing air circulation through the walls"],
+    "a": 1
+  },
+  {
+    "q": "What does the term 'terminal velocity' describe?",
+    "o": ["The maximum speed an object can theoretically reach", "The speed at which air resistance equals gravitational force, so acceleration stops", "The initial speed of a falling object", "The speed of an object at the moment it lands"],
+    "a": 1
+  }
+]

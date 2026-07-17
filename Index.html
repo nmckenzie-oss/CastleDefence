@@ -37,7 +37,7 @@
     <span id="hud-hp">❤️ HP: 100/100</span> <span id="hud-ammo">🏹 Ammo: 3/10</span>
    </div>
    <div class="hud-right">
-    <span id="hud-gold">🪙 Gold: 0</span> <span id="hud-wave">⭐ Wave: 1</span>
+    <span id="hud-gold">🪙 Gold: 0</span> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 General Knowledge</span>
    </div>
   </div><button class="ammo-btn" id="ammo-btn" aria-label="Get ammo by answering a question">🏹 Get Ammo (Q)</button>
   <canvas id="game"></canvas>
@@ -75,13 +75,15 @@ function addTownBuilding() {
     townBuildings++;
 }
 let goldMines = 0, priestHeal = false;
+let currentBossDef = null, towersFrozen = 0;
 
 const stars = [];
 for(let i=0;i<80;i++) stars.push({x:Math.random()*GAME_W, y:Math.random()*140, b:Math.random()});
 const mts1 = [], mts2 = [];
 for(let i=0;i<=16;i++){ mts1.push(180+Math.sin(i*0.7)*25+Math.random()*10); mts2.push(195+Math.sin(i*0.5+2)*15+Math.random()*8); }
 
-const questions = [
+// Default / fallback question bank (used when no code is entered, or a code fails to load)
+const defaultQuestions = [
     {q:"What is 7 × 8?", a:["56","48","64","72"], c:0},
     {q:"Capital of France?", a:["Berlin","Paris","Madrid","Rome"], c:1},
     {q:"Largest planet?", a:["Mars","Jupiter","Saturn","Earth"], c:1},
@@ -103,7 +105,98 @@ const questions = [
     {q:"Who painted Mona Lisa?", a:["Picasso","Da Vinci","Van Gogh","Monet"], c:1},
     {q:"What gas do plants absorb?", a:["O2","N2","CO2","H2"], c:2},
 ];
+
+// Active question bank used by the game. Starts as the default/general knowledge bank.
+let questions = defaultQuestions;
+let currentBankName = 'General Knowledge';
+let currentBankCode = '';
+
 function randQ() { return questions[Math.floor(Math.random()*questions.length)]; }
+
+// ── Teacher setup ──────────────────────────────────────────────────────────
+// These are the codes students/teachers type on the title screen, mapped to a
+// JSON file in the question-banks/ folder and a display name for the HUD.
+// To add a new subject: 1) drop a new JSON file (same format as the existing
+// ones) into question-banks/, 2) add one line below. No other code changes needed.
+// Suggested code format: <year><term><subject initial><detail>, e.g. Year 9
+// biology, term 3, full bank = "93bf"; Year 9 physics, speed topic = "92ps".
+const QUESTION_BANK_FILES = {
+    '93bf': { file:'question-banks/93bf-biology.json', name:'Year 9 Biology' },
+    '92ps': { file:'question-banks/92ps-physics.json',  name:'Year 9 Physics' },
+};
+// ────────────────────────────────────────────────────────────────────────────
+
+// Loads a question bank by teacher/subject code, e.g. "93bf" -> Year 9 Biology.
+// Bank files use the format: [{ "q": "...", "o": ["opt1","opt2","opt3","opt4"], "a": correctIndex }, ...]
+async function loadQuestionBank(code) {
+    code = (code||'').trim().toLowerCase();
+    if(!code) {
+        questions = defaultQuestions;
+        currentBankName = 'General Knowledge';
+        currentBankCode = '';
+        return { ok:true, name: currentBankName };
+    }
+    const entry = QUESTION_BANK_FILES[code];
+    if(!entry) return { ok:false, error:'code-not-found' };
+    try {
+        const bankRes = await fetch(entry.file, {cache:'no-store'});
+        if(!bankRes.ok) throw new Error('bank fetch failed');
+        const bankData = await bankRes.json();
+        if(!Array.isArray(bankData) || bankData.length===0) throw new Error('empty bank');
+        questions = bankData.map(item => ({ q:item.q, a:item.o, c:item.a }));
+        currentBankName = entry.name || code.toUpperCase();
+        currentBankCode = code;
+        return { ok:true, name: currentBankName };
+    } catch(err) {
+        console.error('Failed to load question bank:', err);
+        return { ok:false, error:'fetch-failed' };
+    }
+}
+
+// 10 unique boss types. Each has flavor visuals + one or more abilities.
+// abilities is a list of {type, ...params}. bossUpdate() below interprets these generically.
+const bossDefs = [
+    { id:'necromancer', name:'💀 Necromancer', title:'Raises the dead to swell its ranks',
+      hpMult:1.0, speedMult:1.0, dmgMult:1.0,
+      body:'#5a2a72', robe:'#3f1856', trim:'#a24fd0', eye:'#66ff88', accessory:'staff_skull',
+      abilities:[{type:'summon', enemyType:'skeleton', rate:150}] },
+    { id:'dragonlord', name:'🐉 Dragon Lord', title:'Rains fire down upon the castle from afar',
+      hpMult:1.3, speedMult:0.9, dmgMult:1.1,
+      body:'#7a1a1a', robe:'#5a1010', trim:'#ffaa00', eye:'#ffdd00', accessory:'wings',
+      abilities:[{type:'ranged', dmg:7, rate:120, effect:'fire'}] },
+    { id:'warlord', name:'🛡️ Orc Warlord', title:'Marches to war flanked by bodyguards',
+      hpMult:1.5, speedMult:0.8, dmgMult:1.2,
+      body:'#3a5a2a', robe:'#2a4a1a', trim:'#888888', eye:'#ff3333', accessory:'shoulderspikes',
+      abilities:[{type:'bodyguard', count:2, enemyType:'knight'}] },
+    { id:'assassin', name:'🗡️ Shadow Assassin', title:'Strikes fast, then vanishes into shadow',
+      hpMult:0.8, speedMult:1.4, dmgMult:0.9,
+      body:'#2e2e46', robe:'#1f1f34', trim:'#a044e0', eye:'#cc44ff', accessory:'hood',
+      abilities:[{type:'dash', rate:180, dist:45}] },
+    { id:'golem', name:'🗿 Stone Golem', title:'Its rocky hide shrugs off arrows',
+      hpMult:2.2, speedMult:0.55, dmgMult:1.3,
+      body:'#6a6a5a', robe:'#5a5a4a', trim:'#8a9a6a', eye:'#ffcc44', accessory:'moss',
+      abilities:[{type:'shield', onRate:180, duration:100, reduction:0.65}] },
+    { id:'stormcaller', name:'⚡ Storm Caller', title:'Calls down lightning from the clouds',
+      hpMult:1.1, speedMult:1.0, dmgMult:1.0,
+      body:'#2a3a6a', robe:'#1a2a5a', trim:'#66ccff', eye:'#aaffff', accessory:'staff_orb',
+      abilities:[{type:'ranged', dmg:6, rate:95, effect:'lightning'}] },
+    { id:'vampire', name:'🧛 Vampire Lord', title:'Feeds to mend its own wounds',
+      hpMult:1.2, speedMult:1.1, dmgMult:1.0,
+      body:'#3a0a1a', robe:'#2a0510', trim:'#aa1133', eye:'#ff0044', accessory:'cape',
+      abilities:[{type:'lifesteal', rate:50, amt:4}] },
+    { id:'goblinking', name:'👑 Goblin King', title:'Summons a horde of goblin subjects',
+      hpMult:1.0, speedMult:1.0, dmgMult:0.9,
+      body:'#4a6a2a', robe:'#3a5a1a', trim:'#ffcc00', eye:'#ffff44', accessory:'crown',
+      abilities:[{type:'summon', enemyType:'goblin', rate:95}] },
+    { id:'icequeen', name:'❄️ Ice Queen', title:'Freezes your towers solid',
+      hpMult:1.1, speedMult:1.0, dmgMult:1.0,
+      body:'#2a5a7a', robe:'#1a4a6a', trim:'#aaeeff', eye:'#eeffff', accessory:'icecrown',
+      abilities:[{type:'freeze_towers', rate:220, duration:80}] },
+    { id:'demonoverlord', name:'👹 Demon Overlord', title:'Hurls fire and enrages when wounded',
+      hpMult:1.9, speedMult:0.7, dmgMult:1.4,
+      body:'#a02818', robe:'#6e1810', trim:'#ff8800', eye:'#ffcc00', accessory:'horns',
+      abilities:[{type:'ranged', dmg:9, rate:130, effect:'fire'}, {type:'enrage', threshold:0.3, speedMult:1.8}] },
+];
 
 const allCards = [
     {id:'archer',name:'🏹 Archer Tower',desc:'Auto-shoots nearest enemy',type:'tower',group:'towers',groupWeight:60,cardWeight:60,dmg:8,rate:60,range:150,rangePercent:50,color:'#88aa44'},
@@ -224,9 +317,81 @@ function spawnEnemy(type, x) {
     if(type==='knight'){e.hp=25+wave*3;e.speed=0.3;e.dmg=8;}
     if(type==='wolf'){e.hp=6+wave;e.speed=0.8;e.dmg=4;}
     if(type==='siege'){e.hp=50+wave*5;e.speed=0.2;e.dmg=15;}
-    if(type==='boss'){e.hp=100+wave*20;e.speed=0.25;e.dmg=20;e.y=230;}
+    if(type==='boss'){
+        let def = currentBossDef || bossDefs[0];
+        e.hp=Math.floor((100+wave*20)*def.hpMult);
+        e.speed=0.25*def.speedMult;
+        e.dmg=Math.floor(20*def.dmgMult);
+        e.y=230;
+        e.bossDef=def;
+        e.bossId=def.id;
+        e.abilityTimers={ summon:0, ranged:0, dash:0, shieldOn:0, shieldOff:0, lifesteal:0, freeze:0 };
+        e.shieldActive=false;
+        e.shieldReduction=0;
+        e.enraged=false;
+    }
     e.maxHp=e.hp;
     return e;
+}
+
+// Runs each frame for a living boss enemy: handles summon/ranged/dash/shield/lifesteal/freeze/enrage abilities
+function bossUpdate(e){
+    if(!e.bossDef) return;
+    e.bossDef.abilities.forEach(ab=>{
+        if(ab.type==='summon'){
+            e.abilityTimers.summon++;
+            if(e.abilityTimers.summon>=ab.rate){
+                e.abilityTimers.summon=0;
+                let minion = spawnEnemy(ab.enemyType, e.x - 10 + Math.random()*20);
+                enemies.push(minion);
+                particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:20,color:'#66ff88',size:5});
+            }
+        } else if(ab.type==='ranged'){
+            e.abilityTimers.ranged++;
+            if(e.abilityTimers.ranged>=ab.rate){
+                e.abilityTimers.ranged=0;
+                castleHP=Math.max(0,castleHP-ab.dmg);
+                let col = ab.effect==='lightning' ? '#aaeeff' : '#ff6600';
+                for(let i=0;i<6;i++){
+                    let t=i/6;
+                    particles.push({x:e.x-(e.x-70)*t,y:e.y-(e.y-160)*t,vx:0,vy:0,life:12,color:col,size:6});
+                }
+            }
+        } else if(ab.type==='dash'){
+            e.abilityTimers.dash++;
+            if(e.abilityTimers.dash>=ab.rate){
+                e.abilityTimers.dash=0;
+                e.x=Math.max(105,e.x-ab.dist);
+                for(let i=0;i<8;i++) particles.push({x:e.x+ab.dist*Math.random(),y:e.y,vx:0,vy:0,life:15,color:'#8833cc',size:4});
+            }
+        } else if(ab.type==='shield'){
+            if(e.shieldActive){
+                e.abilityTimers.shieldOff++;
+                if(e.abilityTimers.shieldOff>=ab.duration){ e.shieldActive=false; e.abilityTimers.shieldOff=0; }
+            } else {
+                e.abilityTimers.shieldOn++;
+                if(e.abilityTimers.shieldOn>=ab.onRate){ e.shieldActive=true; e.shieldReduction=ab.reduction; e.abilityTimers.shieldOn=0; }
+            }
+        } else if(ab.type==='lifesteal'){
+            e.abilityTimers.lifesteal++;
+            if(e.abilityTimers.lifesteal>=ab.rate){
+                e.abilityTimers.lifesteal=0;
+                if(e.hp<e.maxHp){ e.hp=Math.min(e.maxHp,e.hp+ab.amt); particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:18,color:'#ff0044',size:4}); }
+            }
+        } else if(ab.type==='freeze_towers'){
+            e.abilityTimers.freeze++;
+            if(e.abilityTimers.freeze>=ab.rate){
+                e.abilityTimers.freeze=0;
+                towersFrozen=ab.duration;
+                particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:20,color:'#aaeeff',size:6});
+            }
+        } else if(ab.type==='enrage'){
+            if(!e.enraged && e.hp/e.maxHp<=ab.threshold){
+                e.enraged=true;
+                e.speed*=ab.speedMult;
+            }
+        }
+    });
 }
 
 let spawnQueue=[], spawnTimer=0;
@@ -251,14 +416,22 @@ function startWave() {
 
 function showBoss(){
     state='boss';
-    modalRoot.innerHTML=`<div class="boss-splash"><div style="font-size:14px;letter-spacing:8px">═══════════════════</div><div style="font-size:28px;margin:16px 0">⚔️ BOSS WAVE ⚔️</div><div style="font-size:18px">${wave%10===0?'🐉 DRAGON LORD':'💀 NECROMANCER'}</div><div style="font-size:14px;letter-spacing:8px;margin-top:12px">═══════════════════</div></div>`;
+    let def = bossDefs[Math.floor(Math.random()*bossDefs.length)];
+    currentBossDef = def;
+    modalRoot.innerHTML=`<div class="boss-splash"><div style="font-size:14px;letter-spacing:8px">═══════════════════</div><div style="font-size:28px;margin:16px 0">⚔️ BOSS WAVE ⚔️</div><div style="font-size:20px">${def.name}</div><div style="font-size:13px;margin-top:8px;color:#ffaacc">${def.title}</div><div style="font-size:14px;letter-spacing:8px;margin-top:12px">═══════════════════</div></div>`;
     setTimeout(()=>{
         modalRoot.innerHTML='';
         state='playing';
         spawnQueue=[];
-        for(let i=0;i<2+Math.floor(wave/5);i++) spawnQueue.push('boss');
+        let bossCount = 1+Math.floor(wave/10);
+        for(let i=0;i<bossCount;i++) spawnQueue.push('boss');
+        def.abilities.forEach(ab=>{
+            if(ab.type==='bodyguard'){
+                for(let i=0;i<ab.count;i++) spawnQueue.push(ab.enemyType);
+            }
+        });
         for(let i=0;i<wave;i++) spawnQueue.push('goblin');
-    },2000);
+    },2500);
 }
 
 function startBetweenWave(){
@@ -332,8 +505,40 @@ function showQuestion(){
 }
 
 function showStart(){
-    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>🏰 CASTLE DEFENCE</h2><p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p><button class="choice-btn" style="text-align:center;font-size:16px" id="start-btn">⚔️ START GAME</button></div></div>`;
-    document.getElementById('start-btn').onclick=()=>{ modalRoot.innerHTML=''; startBetweenWave(); };
+    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center">
+        <h2>🏰 CASTLE DEFENCE</h2>
+        <p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p>
+        <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:12px;margin-bottom:16px">
+            <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code (ask your teacher — leave blank for general knowledge)</label>
+            <input id="bank-code-input" type="text" placeholder="e.g. 93bf" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
+            <div id="bank-status" style="font-size:12px;margin-top:6px;min-height:16px;color:#aaa"></div>
+        </div>
+        <button class="choice-btn" style="text-align:center;font-size:16px" id="start-btn">⚔️ START GAME</button>
+    </div></div>`;
+    const input = document.getElementById('bank-code-input');
+    const status = document.getElementById('bank-status');
+    const startBtn = document.getElementById('start-btn');
+    input.focus();
+    const tryStart = async ()=>{
+        startBtn.disabled = true;
+        startBtn.textContent = 'Loading...';
+        status.style.color = '#aaa';
+        status.textContent = input.value.trim() ? 'Loading question bank...' : '';
+        const result = await loadQuestionBank(input.value);
+        if(result.ok){
+            modalRoot.innerHTML='';
+            startBetweenWave();
+        } else {
+            startBtn.disabled = false;
+            startBtn.textContent = '⚔️ START GAME';
+            status.style.color = '#e74c3c';
+            status.textContent = result.error==='code-not-found'
+                ? "⚠️ Code not recognised — check with your teacher, or leave blank for general knowledge."
+                : "⚠️ Couldn't load question banks (try hosting this file on a local server). Leaving blank uses general knowledge.";
+        }
+    };
+    startBtn.onclick = tryStart;
+    input.addEventListener('keydown', e=>{ if(e.key==='Enter') tryStart(); });
 }
 
 function showGameOver(){
@@ -371,6 +576,7 @@ function updateHUD(){
     document.getElementById('hud-hp').textContent='❤️ HP: '+Math.floor(castleHP)+'/'+maxHP;
     document.getElementById('hud-ammo').textContent='🏹 Ammo: '+ammo+'/'+maxAmmo;
     document.getElementById('hud-gold').textContent='🪙 Gold: '+gold;
+    document.getElementById('hud-bank').textContent='📚 '+currentBankName;
 }
 
 function drawBackground(ox, oy, s){
@@ -718,38 +924,234 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+2, ey+bob+14, 5*s, 5*s);
         ctx.fillRect(ex+15, ey+bob+14, 5*s, 5*s);
     } else if(e.type==='boss'){
-        ctx.fillStyle=frozen?'#88ccff':'#882244';
-        ctx.fillRect(ex, ey+bob-2, 16*s, 20*s);
-        ctx.fillStyle=frozen?'#88ccff':'#aa3366';
-        ctx.fillRect(ex+2, ey+bob-12, 12*s, 11*s);
-        ctx.fillStyle='#ffcc00';
-        ctx.fillRect(ex+2, ey+bob-16, 12*s, 5*s);
-        ctx.fillStyle='#ffaa00';
-        ctx.fillRect(ex+3, ey+bob-18, 2*s, 3*s);
-        ctx.fillRect(ex+7, ey+bob-19, 2*s, 4*s);
-        ctx.fillRect(ex+11, ey+bob-18, 2*s, 3*s);
-        ctx.fillStyle='#ff0044';
-        ctx.fillRect(ex+4, ey+bob-8, 3*s, 3*s);
-        ctx.fillRect(ex+9, ey+bob-8, 3*s, 3*s);
-        ctx.fillStyle='#551133';
-        ctx.fillRect(ex-3, ey+bob, 4*s, 18*s);
-        ctx.fillRect(ex+15, ey+bob, 4*s, 18*s);
-        ctx.fillStyle='#666666';
-        ctx.fillRect(ex+16, ey+bob-10, 3*s, 24*s);
-        ctx.fillStyle='#888888';
-        ctx.fillRect(ex+18, ey+bob-8, 5*s, 8*s);
-        ctx.fillStyle=frozen?'#88ccff':'#772244';
-        ctx.fillRect(ex+2, ey+bob+18, 5*s, 6*s);
-        ctx.fillRect(ex+9, ey+bob+18, 5*s, 6*s);
+        drawBossSprite(e, ex, ey, s, bob, frozen);
     }
 
     // HP bar
     if(e.hp<e.maxHp){
-        let barW = 16;
+        let barW = e.type==='boss' ? 26 : 16;
+        let barY = e.type==='boss' ? -34 : -14;
         ctx.fillStyle='#111';
-        ctx.fillRect(ex, ey-14*s, barW*s, 3*s);
+        ctx.fillRect(ex-(e.type==='boss'?5:0), (ey+barY)*s, barW*s, 3*s);
         ctx.fillStyle=e.type==='boss'?'#ff4444':'#44cc44';
-        ctx.fillRect(ex, ey-14*s, barW*s*(e.hp/e.maxHp), 3*s);
+        ctx.fillRect(ex-(e.type==='boss'?5:0), (ey+barY)*s, barW*s*(e.hp/e.maxHp), 3*s);
+        if(e.type==='boss' && e.bossDef){
+            ctx.font=`${8*s}px monospace`;
+            ctx.fillStyle='#ffcc44';
+            ctx.textAlign='center';
+            ctx.fillText(e.bossDef.name, ex+8*s-(5*s), (ey+barY-3)*s);
+            ctx.textAlign='left';
+        }
+    }
+}
+
+// Detailed boss sprite renderer. Each boss shares a common armored-warrior base
+// (torso/legs/head with shading) so silhouettes read clearly at small scale, then
+// layers on a unique accessory (wings, crown, staff, cape, etc.) per boss type.
+function drawBossSprite(e, ex, ey, s, bob, frozen){
+    let def = e.bossDef || bossDefs[0];
+    let body = frozen ? '#88ccff' : def.body;
+    let robe = frozen ? '#6bb0e0' : def.robe;
+    let trim = def.trim;
+    let eye = def.eye;
+    let pulse = Math.sin(animFrame*0.1)*0.5+0.5;
+
+    // Permanent ground glow in the boss's trim color — keeps every boss readable
+    // against the dark background regardless of how dark its body palette is.
+    ctx.globalAlpha = 0.22+pulse*0.1;
+    ctx.fillStyle = trim;
+    ctx.beginPath();
+    ctx.ellipse((ex+9)*s, (ey+bob+31)*s, 15*s, 5*s, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Shield aura
+    if(e.shieldActive){
+        ctx.globalAlpha = 0.35+pulse*0.2;
+        ctx.fillStyle = '#aaeeff';
+        ctx.beginPath();
+        ctx.arc(ex+11*s, (ey+bob+4)*s, 22*s, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+    // Enrage aura
+    if(e.enraged){
+        ctx.globalAlpha = 0.3+pulse*0.3;
+        ctx.fillStyle = '#ff3300';
+        ctx.beginPath();
+        ctx.arc(ex+11*s, (ey+bob+4)*s, 18*s, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+
+    // Legs
+    ctx.fillStyle = robe;
+    ctx.fillRect((ex+2)*s, (ey+bob+22)*s, 6*s, 9*s);
+    ctx.fillRect((ex+12)*s, (ey+bob+22)*s, 6*s, 9*s);
+    ctx.fillStyle = '#111';
+    ctx.fillRect((ex+2)*s, (ey+bob+29)*s, 6*s, 3*s);
+    ctx.fillRect((ex+12)*s, (ey+bob+29)*s, 6*s, 3*s);
+
+    // Torso (layered shading for extra detail/resolution)
+    ctx.fillStyle = robe;
+    ctx.fillRect(ex*s, (ey+bob-2)*s, 20*s, 26*s);
+    ctx.fillStyle = body;
+    ctx.fillRect((ex+2)*s, (ey+bob)*s, 16*s, 20*s);
+    ctx.fillStyle = trim;
+    ctx.fillRect((ex+2)*s, (ey+bob+9)*s, 16*s, 3*s); // belt
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect((ex+3)*s, (ey+bob+1)*s, 5*s, 16*s); // highlight
+
+    // Arms
+    ctx.fillStyle = robe;
+    ctx.fillRect((ex-4)*s, (ey+bob+2)*s, 5*s, 16*s);
+    ctx.fillRect((ex+19)*s, (ey+bob+2)*s, 5*s, 16*s);
+    ctx.fillStyle = trim;
+    ctx.fillRect((ex-4)*s, (ey+bob+15)*s, 5*s, 4*s);
+    ctx.fillRect((ex+19)*s, (ey+bob+15)*s, 5*s, 4*s);
+
+    // Head
+    ctx.fillStyle = body;
+    ctx.fillRect((ex+4)*s, (ey+bob-14)*s, 12*s, 13*s);
+    ctx.fillStyle = robe;
+    ctx.fillRect((ex+3)*s, (ey+bob-16)*s, 14*s, 5*s); // brow/helmet band
+    // Glowing eyes
+    ctx.fillStyle = eye;
+    ctx.globalAlpha = 0.6+pulse*0.4;
+    ctx.fillRect((ex+6)*s, (ey+bob-9)*s, 3*s, 3*s);
+    ctx.fillRect((ex+11)*s, (ey+bob-9)*s, 3*s, 3*s);
+    ctx.globalAlpha = 1;
+
+    // Contrast outline around the whole silhouette — makes dark-palette bosses
+    // (e.g. Demon Overlord, Necromancer) pop against the dark background.
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = Math.max(1, s*0.6);
+    ctx.strokeRect((ex-4)*s, (ey+bob-16)*s, 28*s, 47*s);
+
+    drawBossAccessory(def, e, ex, ey, s, bob, pulse);
+}
+
+function drawBossAccessory(def, e, ex, ey, s, bob, pulse){
+    const acc = def.accessory;
+    if(acc==='wings'){
+        let flap = Math.sin(animFrame*0.1)*4;
+        ctx.fillStyle = def.robe;
+        ctx.beginPath();
+        ctx.moveTo((ex+1)*s,(ey+bob+2)*s);
+        ctx.lineTo((ex-16)*s,(ey+bob-8-flap)*s);
+        ctx.lineTo((ex-10)*s,(ey+bob+10)*s);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo((ex+19)*s,(ey+bob+2)*s);
+        ctx.lineTo((ex+36)*s,(ey+bob-8+flap)*s);
+        ctx.lineTo((ex+30)*s,(ey+bob+10)*s);
+        ctx.fill();
+    } else if(acc==='staff_skull'){
+        ctx.fillStyle='#444455';
+        ctx.fillRect((ex+21)*s,(ey+bob-20)*s, 2*s, 40*s);
+        ctx.fillStyle=def.eye;
+        ctx.globalAlpha=0.5+pulse*0.5;
+        ctx.fillRect((ex+18)*s,(ey+bob-26)*s, 8*s, 7*s);
+        ctx.globalAlpha=1;
+        ctx.fillStyle='#000';
+        ctx.fillRect((ex+20)*s,(ey+bob-24)*s, 1.5*s, 2*s);
+        ctx.fillRect((ex+23)*s,(ey+bob-24)*s, 1.5*s, 2*s);
+    } else if(acc==='staff_orb'){
+        ctx.fillStyle='#334477';
+        ctx.fillRect((ex+21)*s,(ey+bob-18)*s, 2*s, 38*s);
+        ctx.fillStyle=def.eye;
+        ctx.globalAlpha=0.5+pulse*0.5;
+        ctx.beginPath(); ctx.arc((ex+22)*s,(ey+bob-22)*s, 5*s, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha=1;
+    } else if(acc==='shoulderspikes'){
+        ctx.fillStyle='#777';
+        for(let i=0;i<3;i++){
+            ctx.beginPath();
+            ctx.moveTo((ex-2+i*3)*s,(ey+bob-2)*s);
+            ctx.lineTo((ex-1+i*3)*s,(ey+bob-9)*s);
+            ctx.lineTo((ex+i*3)*s,(ey+bob-2)*s);
+            ctx.fill();
+        }
+        for(let i=0;i<3;i++){
+            ctx.beginPath();
+            ctx.moveTo((ex+16+i*3)*s,(ey+bob-2)*s);
+            ctx.lineTo((ex+17+i*3)*s,(ey+bob-9)*s);
+            ctx.lineTo((ex+18+i*3)*s,(ey+bob-2)*s);
+            ctx.fill();
+        }
+    } else if(acc==='hood'){
+        ctx.fillStyle=def.robe;
+        ctx.fillRect((ex+2)*s,(ey+bob-17)*s, 16*s, 6*s);
+        ctx.beginPath();
+        ctx.moveTo((ex+4)*s,(ey+bob-17)*s);
+        ctx.lineTo((ex+10)*s,(ey+bob-25)*s);
+        ctx.lineTo((ex+16)*s,(ey+bob-17)*s);
+        ctx.fill();
+        if(animFrame%40<20){
+            ctx.globalAlpha=0.28;
+            ctx.fillStyle='#000';
+            ctx.fillRect((ex-4)*s,(ey+bob+2)*s, 28*s, 20*s);
+            ctx.globalAlpha=1;
+        }
+    } else if(acc==='moss'){
+        ctx.fillStyle='#5a7a3a';
+        ctx.fillRect((ex+1)*s,(ey+bob+2)*s, 5*s, 4*s);
+        ctx.fillRect((ex+13)*s,(ey+bob+10)*s, 6*s, 4*s);
+        ctx.fillStyle='#333';
+        ctx.fillRect((ex+4)*s,(ey+bob-4)*s, 1.5*s, 8*s);
+        ctx.fillRect((ex+12)*s,(ey+bob+4)*s, 1.5*s, 10*s);
+    } else if(acc==='cape'){
+        let sway = Math.sin(animFrame*0.08)*3;
+        ctx.fillStyle=def.trim;
+        ctx.beginPath();
+        ctx.moveTo((ex+1)*s,(ey+bob-1)*s);
+        ctx.lineTo((ex-8+sway)*s,(ey+bob+28)*s);
+        ctx.lineTo((ex+19)*s,(ey+bob+24)*s);
+        ctx.lineTo((ex+19)*s,(ey+bob-1)*s);
+        ctx.fill();
+        ctx.fillStyle=def.eye;
+        ctx.fillRect((ex+7)*s,(ey+bob-5)*s, 6*s, 2*s); // fangs hint
+    } else if(acc==='crown'){
+        ctx.fillStyle='#ffcc00';
+        ctx.fillRect((ex+3)*s,(ey+bob-21)*s, 14*s, 5*s);
+        for(let i=0;i<4;i++){
+            ctx.beginPath();
+            ctx.moveTo((ex+3+i*3.5)*s,(ey+bob-21)*s);
+            ctx.lineTo((ex+4.75+i*3.5)*s,(ey+bob-27)*s);
+            ctx.lineTo((ex+6.5+i*3.5)*s,(ey+bob-21)*s);
+            ctx.fill();
+        }
+    } else if(acc==='icecrown'){
+        ctx.fillStyle='#cceeff';
+        for(let i=0;i<3;i++){
+            ctx.beginPath();
+            ctx.moveTo((ex+4+i*5)*s,(ey+bob-16)*s);
+            ctx.lineTo((ex+6.5+i*5)*s,(ey+bob-26)*s);
+            ctx.lineTo((ex+9+i*5)*s,(ey+bob-16)*s);
+            ctx.fill();
+        }
+        if(animFrame%20<10){
+            ctx.fillStyle='rgba(200,240,255,0.5)';
+            ctx.fillRect((ex-2)*s,(ey+bob-30)*s, 24*s, 40*s);
+        }
+    } else if(acc==='horns'){
+        ctx.fillStyle='#221111';
+        ctx.beginPath();
+        ctx.moveTo((ex+3)*s,(ey+bob-14)*s);
+        ctx.lineTo((ex-2)*s,(ey+bob-24)*s);
+        ctx.lineTo((ex+6)*s,(ey+bob-13)*s);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo((ex+17)*s,(ey+bob-14)*s);
+        ctx.lineTo((ex+22)*s,(ey+bob-24)*s);
+        ctx.lineTo((ex+14)*s,(ey+bob-13)*s);
+        ctx.fill();
+        if(e.enraged){
+            ctx.globalAlpha=0.4+pulse*0.4;
+            ctx.fillStyle='#ff4400';
+            ctx.fillRect((ex-6)*s,(ey+bob-6)*s, 32*s, 30*s);
+            ctx.globalAlpha=1;
+        }
     }
 }
 
@@ -782,6 +1184,7 @@ function drawProjectile(p, ox, oy, s){
 }
 
 function towerUpdate(t){
+    if(towersFrozen>0) return;
     t.cooldown--;
     if(t.cooldown>0) return;
     let rate = Math.floor(t.rate / globalSpeedMult);
@@ -847,7 +1250,7 @@ function gameLoop(time){
                     if(e.type==='skeleton') fullDmg = 4;
                     if(e.type==='knight') fullDmg = 8;
                     if(e.type==='siege') fullDmg = 15;
-                    if(e.type==='boss') fullDmg = 25;
+                    if(e.type==='boss') fullDmg = 20+(e.dmg||0);
                     castleHP -= fullDmg;
                     e.dead=true; 
                 } 
@@ -855,6 +1258,8 @@ function gameLoop(time){
         });
 
         enemies=enemies.filter(e=>!e.dead||e.deathTimer<20);
+        enemies.forEach(e=>{ if(e.type==='boss' && !e.dead) bossUpdate(e); });
+        if(towersFrozen>0) towersFrozen--;
         towers.forEach(t=>towerUpdate(t));
 
         if(hasDragon){
@@ -880,7 +1285,11 @@ function gameLoop(time){
                 if(e.dead) return;
                 if(Math.abs(p.x-e.x)<14 && Math.abs(p.y-e.y)<18 && p.life>0){
                     if(p.freeze){ e.frozen=60; }
-                    else { e.hp-=p.dmg; }
+                    else {
+                        let dmgDealt = p.dmg;
+                        if(e.shieldActive) dmgDealt *= (1-e.shieldReduction);
+                        e.hp-=dmgDealt;
+                    }
                     if(p.splash) enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) e2.hp-=p.dmg*0.5; });
                     if(!p.pierce) p.life=0;
                     if(e.hp<=0){ e.dead=true; gold=Math.min(gold+2,maxGold); kills++; }
