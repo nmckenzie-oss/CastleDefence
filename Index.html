@@ -26,6 +26,8 @@
     .hud-left, .hud-right { display: flex; gap: 30px; }
     .ammo-btn { position: fixed; bottom: 16px; right: 16px; z-index: 50; padding: 12px 20px; background: #1a0a2e; border: 2px solid #e94560; color: #fff; font-family: 'Lexend', sans-serif; font-size: 13px; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
     .ammo-btn:hover { background: #e94560; transform: scale(1.05); }
+    .target-btn { position: fixed; bottom: 16px; left: 16px; z-index: 50; padding: 12px 20px; background: #1a0a2e; border: 2px solid #00d4ff; color: #fff; font-family: 'Lexend', sans-serif; font-size: 13px; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
+    .target-btn:hover { background: #00d4ff; color:#0a0a1a; transform: scale(1.05); }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.0/dist/umd/lucide.min.js" type="text/javascript"></script>
   <script src="/_sdk/e3937a0574eb2d69.data_sdk.js" type="text/javascript" integrity="sha512-xbp/ACqEQy1aDxYMtXTrR3y5MUbzxuggRR/9sD48Gl4VhLMMCiAHsxMaFV6DTdeBpR6ymF+t2zhPKYkWM3+Jfw=="></script>
@@ -37,9 +39,10 @@
     <span id="hud-hp">❤️ HP: 100/100</span> <span id="hud-ammo">🏹 Ammo: 3/10</span>
    </div>
    <div class="hud-right">
-    <span id="hud-gold">🪙 Gold: 0</span> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 General Knowledge</span>
+    <span id="hud-gold">🪙 Gold: 0</span> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 General Knowledge</span> <span id="hud-weather" style="color:#ffcc44"></span>
    </div>
   </div><button class="ammo-btn" id="ammo-btn" aria-label="Get ammo by answering a question">🏹 Get Ammo (Q)</button>
+  <button class="target-btn" id="target-btn" aria-label="Cycle tower targeting mode">🎯 Targeting: Nearest</button>
   <canvas id="game"></canvas>
   <div id="modal-root"></div>
   <script src="/_sdk/b7bbbe551ba4f8f5.editing_sdk.js" integrity="sha512-h06pMz6KcVo4Wjvoggb4sS5DZpb55bTriAzBmA0YwbkBA3z2ZXl8CBEbCWT+/fAsm0SwDejJ7jJHOZsLZKqPoQ=="></script>
@@ -69,6 +72,7 @@ let animFrame = 0;
 let castleColor = '#555577', wallHP = 0;
 let globalDmgMult = 1, globalSpeedMult = 1;
 let hasMoat = false, hasKing = false, hasDragon = false, hasMeteor = false, hasElite = false;
+let dragonTimer = 0, meteorTimer = 0;
 let townBuildings = 0;
 
 function addTownBuilding() {
@@ -76,6 +80,112 @@ function addTownBuilding() {
 }
 let goldMines = 0, priestHeal = false;
 let currentBossDef = null, towersFrozen = 0;
+let towerTargetMode = 'nearest'; // 'nearest' | 'strongest' — cycled via the HUD button
+let lightningBolts = []; // transient visual chain-lightning effects: {points:[{x,y},...], life}
+let ammoPerCorrect = 1;
+
+// ── Weather system ──────────────────────────────────────────────────────────
+// Pity-based random weather: each effect starts at 1% chance per roll and
+// climbs +1% every roll it doesn't trigger; the moment it triggers its own
+// chance resets to 1%. Guarantees no effect stays dormant forever, and the
+// same effect can't realistically repeat back-to-back.
+const WEATHER_EFFECTS = [
+    { id:'rain',     name:'🌧️ Rain',          desc:'Fire towers deal 50% less damage' },
+    { id:'fog',      name:'🌫️ Fog',           desc:'Tower range reduced by 50%' },
+    { id:'night',    name:'🌙 Night',          desc:'Enemies spawn much faster' },
+    { id:'eclipse',  name:'🌑 Solar Eclipse',  desc:'Enemies are 50% stronger, tougher & faster' },
+    { id:'blizzard', name:'❄️ Blizzard',       desc:'Towers fire 50% slower' },
+];
+let weatherPity = {};
+WEATHER_EFFECTS.forEach(w => weatherPity[w.id] = 1);
+let activeWeather = null;      // id from WEATHER_EFFECTS, or null (clear)
+let weatherWavesLeft = 0;      // waves remaining before the next re-roll
+
+function rollWeather(){
+    let ids = shuffle(WEATHER_EFFECTS.map(w=>w.id));
+    let winner = null;
+    for(let id of ids){
+        if(Math.random()*100 < weatherPity[id]){ winner = id; break; }
+    }
+    WEATHER_EFFECTS.forEach(w=>{
+        weatherPity[w.id] = (w.id===winner) ? 1 : Math.min(100, weatherPity[w.id]+1);
+    });
+    activeWeather = winner;
+    weatherWavesLeft = 3; // weather lasts ~3 waves before the next roll
+}
+
+// ── Pre-boss affix waves ────────────────────────────────────────────────────
+const AFFIX_DEFS = [
+    { id:'horde',    name:'⚔️ The Horde',        desc:'Only goblins spawn this wave — but a LOT of them' },
+    { id:'siege',    name:'🏰 The Siege',         desc:'Siege engines only — wave-number strong' },
+    { id:'wolves',   name:'🐺 The Wolves',        desc:'Only fast wolves this wave — brace for speed' },
+    { id:'guard',    name:'🛡️ Royal Guard',       desc:'Only heavily-armored knights this wave' },
+    { id:'undead',   name:'💀 Undead Rising',     desc:'Slain enemies rise again as skeletons' },
+    { id:'caravan',  name:'💰 Treasure Caravan',  desc:'Kill the gold wagons for bonus gold!' },
+];
+let activeAffix = null;
+let treasureGoldBonus = 15;
+
+// ── Merchant risk/reward events ─────────────────────────────────────────────
+let waveGoldMult = 1, waveDmgMult = 1, waveContactDmgMult = 1;
+let skipNextCardReward = false, forceBossThisWave = false;
+let pendingFreeTowerAfterBoss = false, forceNextWaveDoubleEnemies = false, skipThisWaveSpawns = false;
+
+const MERCHANT_OFFERS = [
+    { name:'Double Trouble', risk:'Double enemies next wave', reward:'Double gold this wave',
+      apply(){ forceNextWaveDoubleEnemies=true; waveGoldMult*=2; } },
+    { name:'Bring the Boss', risk:'A boss fight begins immediately', reward:'Free tower once the boss falls',
+      apply(){ forceBossThisWave=true; pendingFreeTowerAfterBoss=true; } },
+    { name:'Fragile Kingdom', risk:'Castle max health quartered (permanent)', reward:'Ammo per correct answer doubled (permanent)',
+      apply(){ maxHP=Math.max(10,Math.floor(maxHP/4)); castleHP=Math.min(castleHP,maxHP); ammoPerCorrect*=2; } },
+    { name:'Reckless Barrage', risk:'Castle takes double contact damage this wave', reward:'Towers deal +50% damage this wave',
+      apply(){ waveContactDmgMult*=2; waveDmgMult*=1.5; } },
+    { name:'Midas Wave', risk:'No card reward after this wave', reward:'Triple gold this wave',
+      apply(){ skipNextCardReward=true; waveGoldMult*=3; } },
+    { name:'Glass Cannon', risk:'Max ammo capacity halved (permanent)', reward:'Global damage doubled (permanent)',
+      apply(){ maxAmmo=Math.max(1,Math.floor(maxAmmo/2)); ammo=Math.min(ammo,maxAmmo); globalDmgMult*=2; } },
+    { name:'Blood Moon Pact', risk:"Next wave's enemy count is doubled", reward:'This wave is instantly cleared',
+      apply(){ forceNextWaveDoubleEnemies=true; skipThisWaveSpawns=true; } },
+    { name:'Desperate Gambit', risk:'Enemies deal double contact damage this wave', reward:'Castle heals to full right now',
+      apply(){ waveContactDmgMult*=2; castleHP=maxHP; } },
+];
+
+// Resistance mechanic: some enemies (e.g. Leshy) are only efficiently damaged
+// by a specific source (a named tower id, or 'player' for manually-fired arrows).
+// Everything else still works, just at a steep penalty, so the fight is never
+// literally unwinnable if the player skipped that tower — just very slow.
+function getResistanceMult(e, sourceId){
+    if(e.onlyVulnerableTo) return e.onlyVulnerableTo.includes(sourceId) ? 1 : (e.resistMult!==undefined?e.resistMult:0.15);
+    if(e.resist) return e.resist.includes(sourceId) ? (e.resistMult!==undefined?e.resistMult:0.5) : 1;
+    return 1;
+}
+
+// Shared damage application + death handling, used by direct hits, splash
+// damage, and poison ticks alike — so gold/kills/undead-rising are always
+// credited consistently no matter which source did the killing blow.
+function applyDamageToEnemy(e, rawDmg, sourceId){
+    if(!e || e.dead) return;
+    let dmgDealt = rawDmg * getResistanceMult(e, sourceId);
+    if(e.shieldActive) dmgDealt *= (1-e.shieldReduction);
+    e.hp -= dmgDealt;
+    if(e.hp<=0){
+        e.dead=true;
+        kills++;
+        let goldReward = e.isWagon ? treasureGoldBonus : 2;
+        gold=Math.min(gold+Math.round(goldReward*waveGoldMult), maxGold);
+        if(activeAffix==='undead' && e.type!=='wagon' && e.type!=='skeleton' && e.type!=='boss'){
+            enemies.push(spawnEnemy('skeleton', e.x));
+        }
+    }
+}
+
+function shuffle(arr){
+    for(let i=arr.length-1;i>0;i--){
+        let j=Math.floor(Math.random()*(i+1));
+        [arr[i],arr[j]]=[arr[j],arr[i]];
+    }
+    return arr;
+}
 
 const stars = [];
 for(let i=0;i<80;i++) stars.push({x:Math.random()*GAME_W, y:Math.random()*140, b:Math.random()});
@@ -199,12 +309,14 @@ const bossDefs = [
 ];
 
 const allCards = [
-    {id:'archer',name:'🏹 Archer Tower',desc:'Auto-shoots nearest enemy',type:'tower',group:'towers',groupWeight:60,cardWeight:60,dmg:8,rate:60,range:150,rangePercent:50,color:'#88aa44'},
-    {id:'ballista',name:'⚡ Ballista',desc:'Long range, pierces',type:'tower',group:'towers',groupWeight:60,cardWeight:20,dmg:15,rate:45,range:375,rangePercent:65,color:'#aabb66',pierce:true},
-    {id:'cannon',name:'💣 Cannon',desc:'Slow, huge explosions',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:40,rate:150,range:120,rangePercent:40,color:'#665544',splash:30},
-    {id:'firemage',name:'🔥 Fire Mage',desc:'Casts fireballs',type:'tower',group:'towers',groupWeight:60,cardWeight:5,dmg:12,rate:70,range:140,rangePercent:55,color:'#ff6600'},
-    {id:'icemage',name:'❄️ Ice Mage',desc:'Freezes groups',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:0,rate:100,range:130,rangePercent:60,color:'#44ccff',freeze:true},
-    {id:'axeman',name:'🪓 Axeman',desc:'Short burst axes',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:10,rate:40,range:90,rangePercent:35,color:'#aa6633'},
+    {id:'archer',name:'🏹 Archer Tower',desc:'Auto-shoots nearest enemy',type:'tower',group:'towers',groupWeight:60,cardWeight:60,dmg:10,rate:160,range:256,rangePercent:50,color:'#88aa44'},
+    {id:'ballista',name:'⚡ Ballista',desc:'Long range, pierces',type:'tower',group:'towers',groupWeight:60,cardWeight:20,dmg:10,rate:240,range:512,rangePercent:100,color:'#aabb66',pierce:true},
+    {id:'cannon',name:'💣 Cannon',desc:'Slow, huge explosions',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:40,rate:500,range:205,rangePercent:40,color:'#665544',splash:30},
+    {id:'firemage',name:'🔥 Fire Mage',desc:'Casts fireballs',type:'tower',group:'towers',groupWeight:60,cardWeight:5,dmg:12,rate:160,range:282,rangePercent:55,color:'#ff6600'},
+    {id:'icemage',name:'❄️ Ice Mage',desc:'Freezes groups',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:0,rate:300,range:307,rangePercent:60,color:'#44ccff',freeze:true},
+    {id:'axeman',name:'🪓 Axeman',desc:'Short burst axes',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:10,rate:80,range:179,rangePercent:35,color:'#aa6633'},
+    {id:'lightning',name:'⚡ Lightning Tower',desc:'Instant chain strike, no travel time',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:9,rate:190,range:230,rangePercent:45,color:'#ffee44',chainCount:3,chainFalloff:0.6,chainRadius:70},
+    {id:'poison',name:'🧪 Alchemist Tower',desc:'Lobs a poison flask in an arc — misses shatter into a poison splash',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:3,rate:170,range:256,rangePercent:50,color:'#77aa22',poison:{ticks:6,dmgPerTick:2.5},splash:22},
     {id:'goldmine',name:'💰 Gold Mine',desc:'+5 gold per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45},
     {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max gold',type:'economy',group:'economy',groupWeight:20,cardWeight:45},
     {id:'merchant',name:'🛒 Merchant',desc:'Upgrades cost less',type:'economy',group:'economy',groupWeight:20,cardWeight:10},
@@ -278,7 +390,7 @@ function applyCard(card) {
             let upgradeIdx = (existing.level - 2) % cycle.length;
             let stat = cycle[upgradeIdx];
             if(stat === 'dmg') existing.dmg = Math.floor(existing.dmg * 1.4);
-            else if(stat === 'range') existing.range = Math.floor(existing.range * 1.25);
+            else if(stat === 'range'){ existing.rangePercent = Math.min(100, Math.floor(existing.rangePercent * 1.25)); existing.range = Math.floor(existing.rangePercent * GAME_W / 100); }
             else if(stat === 'rate') existing.rate = Math.max(10, Math.floor(existing.rate * 0.75));
             else if(stat === 'splash') existing.splash = (existing.splash || 30) + 15;
             addTownBuilding();
@@ -312,11 +424,24 @@ function applyCard(card) {
 
 function spawnEnemy(type, x) {
     let e = {x: x||GAME_W+10, y: 225+Math.random()*20, type, frame:0, frameTimer:0, hp:10, maxHp:10, speed:0.4, dmg:5, frozen:0, dead:false, deathTimer:0};
-    if(type==='goblin'){e.hp=8+wave*2;e.speed=0.5;e.dmg=3;}
-    if(type==='skeleton'){e.hp=12+wave*2;e.speed=0.35;e.dmg=5;}
+    if(type==='goblin'){e.hp=5+wave*2;e.speed=0.5;e.dmg=3;}
+    if(type==='skeleton'){e.hp=10+wave*3;e.speed=0.35;e.dmg=5;}
     if(type==='knight'){e.hp=25+wave*3;e.speed=0.3;e.dmg=8;}
     if(type==='wolf'){e.hp=6+wave;e.speed=0.8;e.dmg=4;}
-    if(type==='siege'){e.hp=50+wave*5;e.speed=0.2;e.dmg=15;}
+    if(type==='siege'){e.hp=75+wave*5;e.speed=0.2;e.dmg=15;}
+    if(type==='wagon'){e.hp=15+wave;e.speed=0.4;e.dmg=0;e.isWagon=true;}
+    if(type==='goblin_scout'){e.hp=3+wave;e.speed=0.9;e.dmg=2;}
+    if(type==='goblin_armored'){e.hp=14+wave*3;e.speed=0.35;e.dmg=4;e.resist=['archer','axeman','ballista','cannon','player'];e.resistMult=0.5;}
+    if(type==='wolf_dire'){e.hp=16+wave*2;e.speed=0.7;e.dmg=7;}
+    if(type==='shade'){e.hp=12+wave*2;e.speed=0.45;e.dmg=5;e.resist=['firemage','icemage'];e.resistMult=0.4;}
+    if(type==='leshy'){e.hp=30+wave*4;e.speed=0.25;e.dmg=6;e.onlyVulnerableTo=['firemage'];e.resistMult=0.12;}
+    if(type==='wisphawk'){e.hp=10+wave*2;e.speed=0.7;e.dmg=3;e.onlyVulnerableTo=['archer'];e.resistMult=0.12;}
+    if(type==='brambletreant'){e.hp=26+wave*3;e.speed=0.22;e.dmg=6;e.onlyVulnerableTo=['axeman'];e.resistMult=0.12;}
+    if(type==='embersalamander'){e.hp=20+wave*3;e.speed=0.4;e.dmg=5;e.onlyVulnerableTo=['icemage'];e.resistMult=0.12;}
+    if(type==='irongolem'){e.hp=45+wave*5;e.speed=0.2;e.dmg=9;e.onlyVulnerableTo=['ballista'];e.resistMult=0.12;}
+    if(type==='bombbeetle'){e.hp=35+wave*4;e.speed=0.3;e.dmg=7;e.onlyVulnerableTo=['cannon'];e.resistMult=0.12;}
+    if(type==='golemsentinel'){e.hp=40+wave*5;e.speed=0.25;e.dmg=8;e.onlyVulnerableTo=['lightning'];e.resistMult=0.12;}
+    if(type==='rottedrevenant'){e.hp=32+wave*4;e.speed=0.28;e.dmg=6;e.onlyVulnerableTo=['poison'];e.resistMult=0.12;}
     if(type==='boss'){
         let def = currentBossDef || bossDefs[0];
         e.hp=Math.floor((100+wave*20)*def.hpMult);
@@ -329,6 +454,11 @@ function spawnEnemy(type, x) {
         e.shieldActive=false;
         e.shieldReduction=0;
         e.enraged=false;
+    }
+    if(activeWeather==='eclipse' && type!=='wagon'){
+        e.hp=Math.ceil(e.hp*1.5);
+        e.speed*=1.5;
+        e.dmg=Math.ceil(e.dmg*1.5);
     }
     e.maxHp=e.hp;
     return e;
@@ -396,22 +526,111 @@ function bossUpdate(e){
 
 let spawnQueue=[], spawnTimer=0;
 
+// Per-type wave composition. Goblin/Skeleton counts grow with wave² (explosive
+// swarm growth by design); Knight/Wolf/Siege stay linear (rarer elite units).
+// Variants (scout/armored/dire/shade/leshy) layer extra variety on top, Bloons-style —
+// some resist most towers and are only efficient to kill with a specific counter.
+const ENEMY_SPAWN_TABLE = [
+    { type:'goblin',          unlock:1,  count:(w)=> 2 + w*w },
+    { type:'goblin_scout',    unlock:2,  count:(w)=> Math.floor(w/2) },
+    { type:'skeleton',        unlock:3,  count:(w)=> w*w },
+    { type:'wisphawk',        unlock:4,  count:(w)=> Math.max(1, Math.floor(w/7)) },
+    { type:'goblin_armored',  unlock:5,  count:(w)=> Math.floor(w/2) },
+    { type:'brambletreant',   unlock:6,  count:(w)=> Math.max(1, Math.floor(w/7)) },
+    { type:'knight',          unlock:6,  count:(w)=> w },
+    { type:'leshy',           unlock:8,  count:(w)=> Math.max(1, Math.floor(w/6)) },
+    { type:'shade',           unlock:9,  count:(w)=> Math.floor(w/3) },
+    { type:'wolf',            unlock:9,  count:(w)=> w*2 },
+    { type:'embersalamander', unlock:10, count:(w)=> Math.max(1, Math.floor(w/7)) },
+    { type:'wolf_dire',       unlock:11, count:(w)=> Math.floor(w/3) },
+    { type:'siege',           unlock:12, count:(w)=> Math.round(w/2) },
+    { type:'irongolem',       unlock:13, count:(w)=> Math.max(1, Math.floor(w/8)) },
+    { type:'bombbeetle',      unlock:16, count:(w)=> Math.max(1, Math.floor(w/8)) },
+    { type:'golemsentinel',   unlock:19, count:(w)=> Math.max(1, Math.floor(w/8)) },
+    { type:'rottedrevenant',  unlock:22, count:(w)=> Math.max(1, Math.floor(w/8)) },
+];
+
+// Caps how many enemies can be alive at once. Wave counts grow quadratically,
+// so without this cap a late wave could spawn hundreds of enemies in a way
+// that bogs down the browser; spawning just pauses (queue is untouched) until
+// the alive count drops back below the cap, then resumes automatically.
+const MAX_ALIVE_ENEMIES = 150;
+
 function startWave() {
     wave++;
-    state='playing';
     gold += goldMines*5;
     if(wallHP>0) castleHP=Math.min(castleHP+wallHP, maxHP);
     if(priestHeal) castleHP=Math.min(castleHP+5, maxHP);
     spawnQueue=[];
-    if(wave%5===0){ showBoss(); return; }
-    let count = 3 + wave*2;
-    for(let i=0;i<count;i++){
-        let types=['goblin','goblin','skeleton','knight','wolf','siege'];
-        let t=types[Math.floor(Math.random()*Math.min(2+Math.floor(wave/3),types.length))];
-        spawnQueue.push(t);
+    waveGoldMult=1; waveDmgMult=1; waveContactDmgMult=1;
+    activeAffix=null;
+
+    let isBossWave = (wave%5===0) || forceBossThisWave;
+    forceBossThisWave=false;
+
+    // Weather doesn't re-roll on boss waves — it carries over.
+    let weatherChanged=false;
+    if(!isBossWave){
+        weatherWavesLeft--;
+        if(weatherWavesLeft<=0){ let prev=activeWeather; rollWeather(); weatherChanged=(activeWeather!==prev); }
     }
-    spawnTimer=0;
-    updateHUD();
+
+    if(isBossWave){ showBoss(); return; }
+
+    let isPreBoss = (wave+1)%5===0;
+    if(isPreBoss) activeAffix = AFFIX_DEFS[Math.floor(Math.random()*AFFIX_DEFS.length)].id;
+
+    let doubleEnemies = forceNextWaveDoubleEnemies;
+    forceNextWaveDoubleEnemies=false;
+    buildWaveComposition(doubleEnemies);
+
+    if(skipThisWaveSpawns){ skipThisWaveSpawns=false; spawnQueue=[]; }
+
+    let affixDef = AFFIX_DEFS.find(a=>a.id===activeAffix);
+    if(weatherChanged || affixDef){
+        showWaveAnnouncement(weatherChanged, affixDef);
+    } else {
+        state='playing'; spawnTimer=0; updateHUD();
+    }
+}
+
+function buildWaveComposition(doubleEnemies){
+    let baseCounts = {};
+    ENEMY_SPAWN_TABLE.forEach(spec=>{
+        baseCounts[spec.type] = (wave>=spec.unlock) ? Math.max(0, Math.floor(spec.count(wave))) : 0;
+    });
+    if(doubleEnemies) Object.keys(baseCounts).forEach(k=>baseCounts[k]*=2);
+    let total = Object.values(baseCounts).reduce((a,b)=>a+b,0);
+
+    if(activeAffix==='horde') spawnQueue = Array(total).fill('goblin');
+    else if(activeAffix==='siege') spawnQueue = Array(wave).fill('siege');
+    else if(activeAffix==='wolves') spawnQueue = Array(total).fill('wolf');
+    else if(activeAffix==='guard') spawnQueue = Array(total).fill('knight');
+    else if(activeAffix==='caravan') spawnQueue = Array(Math.max(6,total)).fill('wagon');
+    else {
+        spawnQueue=[];
+        Object.entries(baseCounts).forEach(([t,n])=>{ for(let i=0;i<n;i++) spawnQueue.push(t); });
+    }
+    shuffle(spawnQueue);
+}
+
+function showWaveAnnouncement(weatherChanged, affixDef){
+    state='boss'; // reuse the same input-blocking state as the boss splash
+    let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
+    let html = `<div class="boss-splash"><div style="font-size:14px;letter-spacing:8px">═══════════════════</div>`;
+    if(weatherChanged){
+        html += w ? `<div style="font-size:24px;margin:12px 0">${w.name}</div><div style="font-size:13px;color:#ffaacc">${w.desc}</div>`
+                  : `<div style="font-size:22px;margin:12px 0">☀️ Clear Skies</div><div style="font-size:13px;color:#ffaacc">The weather settles</div>`;
+    }
+    if(affixDef){
+        html += `<div style="font-size:24px;margin:12px 0">${affixDef.name}</div><div style="font-size:13px;color:#ffaacc">${affixDef.desc}</div>`;
+    }
+    html += `<div style="font-size:14px;letter-spacing:8px;margin-top:12px">═══════════════════</div></div>`;
+    modalRoot.innerHTML=html;
+    setTimeout(()=>{
+        modalRoot.innerHTML='';
+        state='playing'; spawnTimer=0; updateHUD();
+    },2200);
 }
 
 function showBoss(){
@@ -431,13 +650,44 @@ function showBoss(){
             }
         });
         for(let i=0;i<wave;i++) spawnQueue.push('goblin');
+        spawnTimer=0;
     },2500);
 }
 
 function startBetweenWave(){
     state='between';
-    betweenWaveQuestions=0; betweenWaveCorrect=0;
-    askBetweenQuestion();
+    if(pendingFreeTowerAfterBoss){
+        pendingFreeTowerAfterBoss=false;
+        let towerCards = allCards.filter(c=>c.type==='tower');
+        applyCard(towerCards[Math.floor(Math.random()*towerCards.length)]);
+    }
+    let nextWave = wave+1;
+    let nextIsBoss = nextWave%5===0;
+    if(!nextIsBoss && Math.random()<0.05){
+        showMerchant(()=>{ betweenWaveQuestions=0; betweenWaveCorrect=0; askBetweenQuestion(); });
+    } else {
+        betweenWaveQuestions=0; betweenWaveCorrect=0;
+        askBetweenQuestion();
+    }
+}
+
+function showMerchant(onDone){
+    let offer = MERCHANT_OFFERS[Math.floor(Math.random()*MERCHANT_OFFERS.length)];
+    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center">
+        <h2>🧙 A Mysterious Merchant Appears</h2>
+        <p style="margin:12px 0;color:#aaa">"I have a deal for you, traveler... but deals like this cut both ways."</p>
+        <div style="background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:14px;margin:16px 0;text-align:left">
+            <div style="font-size:16px;font-weight:bold;color:#ffcc44;margin-bottom:8px">${offer.name}</div>
+            <div style="font-size:13px;color:#ff6666;margin-bottom:4px">⚠️ Risk: ${offer.risk}</div>
+            <div style="font-size:13px;color:#66ff88">✨ Reward: ${offer.reward}</div>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:center">
+            <button class="choice-btn" id="merchant-accept">Accept the deal</button>
+            <button class="choice-btn" id="merchant-decline">Walk away</button>
+        </div>
+    </div></div>`;
+    document.getElementById('merchant-accept').onclick=()=>{ offer.apply(); modalRoot.innerHTML=''; onDone(); };
+    document.getElementById('merchant-decline').onclick=()=>{ modalRoot.innerHTML=''; onDone(); };
 }
 
 function askBetweenQuestion(){
@@ -460,7 +710,21 @@ function askBetweenQuestion(){
     });
 }
 
+// Enemies that are only efficiently damaged by one specific tower (everything
+// else still works, just at a steep penalty — see getResistanceMult).
+const ENEMY_SINGLE_COUNTER = {
+    wisphawk:        { tower:'archer',    name:'Wisp Hawk 🦅' },
+    brambletreant:   { tower:'axeman',    name:'Bramble Treant 🌲' },
+    leshy:           { tower:'firemage',  name:'Leshy 🌳' },
+    embersalamander: { tower:'icemage',   name:'Ember Salamander 🦎' },
+    irongolem:       { tower:'ballista',  name:'Iron Golem 🗿' },
+    bombbeetle:      { tower:'cannon',    name:'Bomb Beetle 🪲' },
+    golemsentinel:   { tower:'lightning', name:'Golem Sentinel ⚙️' },
+    rottedrevenant:  { tower:'poison',    name:'Rotted Revenant 🧟' },
+};
+
 function showCardSelect(){
+    if(skipNextCardReward){ skipNextCardReward=false; startWave(); return; }
     let n=Math.max(1,betweenWaveCorrect);
     let options=pickCards(n);
     let html=`<div class="modal-overlay"><div class="modal-box"><h2>${betweenWaveCorrect}/4 Correct! Choose one:</h2><div style="margin-top:16px">`;
@@ -469,7 +733,28 @@ function showCardSelect(){
         let extra = existing ? `<div style="font-size:10px;color:#4caf50;margin-top:2px">⬆ Upgrade Lv${existing.level+1}</div>` : '';
         html+=`<button class="card-btn" data-idx="${i}"><div style="font-size:20px">${c.name}</div><div style="font-size:11px;margin-top:4px;color:#aaa">${c.desc}</div>${extra}</button>`;
     });
-    html+=`</div></div></div>`;
+    html+=`</div>`;
+
+    // Countdown preview: only for enemies with a single hard-counter tower, so
+    // the player knows to have that tower built before it arrives.
+    let nextWave = wave+1;
+    let upcoming = ENEMY_SPAWN_TABLE.filter(spec => spec.unlock>nextWave && spec.unlock-nextWave<=5 && ENEMY_SINGLE_COUNTER[spec.type])
+        .sort((a,b)=>a.unlock-b.unlock);
+    if(upcoming.length){
+        html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #443;font-size:11px;color:#aaa">`;
+        upcoming.forEach(spec=>{
+            let waves = spec.unlock-nextWave;
+            let counter = ENEMY_SINGLE_COUNTER[spec.type];
+            let towerCard = allCards.find(c=>c.id===counter.tower);
+            let towerName = towerCard ? towerCard.name : counter.tower;
+            let owned = towers.some(t=>t.id===counter.tower);
+            let unlockNote = owned ? '' : ` — ${towerName} isn't unlocked yet!`;
+            html += `<div>⚠️ ${counter.name} incoming in ${waves} wave${waves===1?'':'s'} — only ${towerName} damages it effectively${unlockNote}</div>`;
+        });
+        html += `</div>`;
+    }
+
+    html+=`</div></div>`;
     modalRoot.innerHTML=html;
     modalRoot.querySelectorAll('.card-btn').forEach(btn=>{
         btn.onclick=()=>{
@@ -492,7 +777,7 @@ function showQuestion(){
     modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
         btn.onclick=()=>{
             let isCorrect=btn.dataset.correct==='true';
-            if(isCorrect){ btn.classList.add('correct'); ammo=Math.min(ammo+1,maxAmmo); }
+            if(isCorrect){ btn.classList.add('correct'); ammo=Math.min(ammo+ammoPerCorrect,maxAmmo); }
             else { 
                 btn.classList.add('wrong'); 
                 castleHP = Math.max(0, castleHP - 1);
@@ -510,7 +795,7 @@ function showStart(){
         <p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p>
         <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:12px;margin-bottom:16px">
             <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code (ask your teacher — leave blank for general knowledge)</label>
-            <input id="bank-code-input" type="text" placeholder="e.g. 93bf" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
+            <input id="bank-code-input" type="text" placeholder="Class Code Here" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
             <div id="bank-status" style="font-size:12px;margin-top:6px;min-height:16px;color:#aaa"></div>
         </div>
         <button class="choice-btn" style="text-align:center;font-size:16px" id="start-btn">⚔️ START GAME</button>
@@ -560,16 +845,20 @@ canvas.addEventListener('click', (e)=>{
     if(hasElite){
         for(let s=-1;s<=1;s++){
             let a=angle+s*0.15;
-            projectiles.push({x:sx,y:sy,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,dmg:10*globalDmgMult,type:'arrow',life:80});
+            projectiles.push({x:sx,y:sy,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,dmg:10*globalDmgMult,type:'arrow',life:80,sourceTowerId:'player'});
         }
     } else {
-        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg:10*globalDmgMult,type:'arrow',life:80});
+        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg:10*globalDmgMult,type:'arrow',life:80,sourceTowerId:'player'});
     }
     updateHUD();
 });
 
 document.addEventListener('keydown',(e)=>{ if(e.key==='q'||e.key==='Q') showQuestion(); });
 document.getElementById('ammo-btn').onclick=()=>showQuestion();
+document.getElementById('target-btn').onclick=()=>{
+    towerTargetMode = (towerTargetMode==='nearest') ? 'strongest' : 'nearest';
+    document.getElementById('target-btn').textContent = towerTargetMode==='nearest' ? '🎯 Targeting: Nearest' : '🎯 Targeting: Strongest';
+};
 
 function updateHUD(){
     document.getElementById('hud-wave').textContent='⭐ Wave: '+wave;
@@ -577,6 +866,8 @@ function updateHUD(){
     document.getElementById('hud-ammo').textContent='🏹 Ammo: '+ammo+'/'+maxAmmo;
     document.getElementById('hud-gold').textContent='🪙 Gold: '+gold;
     document.getElementById('hud-bank').textContent='📚 '+currentBankName;
+    let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
+    document.getElementById('hud-weather').textContent = w ? w.name : '';
 }
 
 function drawBackground(ox, oy, s){
@@ -634,59 +925,171 @@ function drawBackground(ox, oy, s){
     for(let i=120;i<GAME_W;i+=20){
         ctx.fillRect((ox+i)*s,(oy+246)*s, 8*s, 4*s);
     }
+    drawWeatherOverlay(ox, oy, s);
+}
+
+// Tints the whole scene and layers weather-specific effects on top, so each
+// active weather is visually obvious at a glance, not just a stat modifier.
+function drawWeatherOverlay(ox, oy, s){
+    if(!activeWeather) return;
+    if(activeWeather==='rain'){
+        ctx.fillStyle='rgba(40,60,90,0.28)';
+        ctx.fillRect(0,0,W,H);
+        ctx.strokeStyle='rgba(180,200,230,0.55)';
+        ctx.lineWidth=Math.max(1,s*0.5);
+        for(let i=0;i<40;i++){
+            let seed=i*137.5;
+            let x=seed%GAME_W;
+            let y=((animFrame*4+seed*3)%(GAME_H+40))-20;
+            ctx.beginPath();
+            ctx.moveTo((ox+x)*s,(oy+y)*s);
+            ctx.lineTo((ox+x-6)*s,(oy+y+14)*s);
+            ctx.stroke();
+        }
+    } else if(activeWeather==='fog'){
+        ctx.fillStyle='rgba(200,200,210,0.32)';
+        ctx.fillRect(0,0,W,H);
+        for(let i=0;i<6;i++){
+            let seed=i*81.3;
+            let x=((animFrame*0.3+seed*40)%(GAME_W+120))-60;
+            let y=140+(i%3)*30;
+            ctx.fillStyle='rgba(255,255,255,0.18)';
+            ctx.beginPath();
+            ctx.ellipse((ox+x)*s,(oy+y)*s, 50*s, 18*s, 0,0,Math.PI*2);
+            ctx.fill();
+        }
+    } else if(activeWeather==='night'){
+        ctx.fillStyle='rgba(5,5,25,0.45)';
+        ctx.fillRect(0,0,W,H);
+    } else if(activeWeather==='eclipse'){
+        ctx.fillStyle='rgba(90,15,15,0.32)';
+        ctx.fillRect(0,0,W,H);
+        ctx.fillStyle='#110000';
+        ctx.beginPath(); ctx.arc((ox+400)*s,(oy+40)*s,13*s,0,Math.PI*2); ctx.fill();
+        ctx.strokeStyle='rgba(255,120,60,0.8)';
+        ctx.lineWidth=Math.max(1,s*1.5);
+        ctx.beginPath(); ctx.arc((ox+400)*s,(oy+40)*s,15*s,0,Math.PI*2); ctx.stroke();
+    } else if(activeWeather==='blizzard'){
+        ctx.fillStyle='rgba(210,225,245,0.28)';
+        ctx.fillRect(0,0,W,H);
+        ctx.fillStyle='rgba(255,255,255,0.85)';
+        for(let i=0;i<50;i++){
+            let seed=i*97.7;
+            let x=((seed*3+Math.sin(animFrame*0.02+i)*10)%GAME_W+GAME_W)%GAME_W;
+            let y=((animFrame*2+seed*2)%(GAME_H+20))-10;
+            ctx.fillRect((ox+x)*s,(oy+y)*s, 2*s, 2*s);
+        }
+    }
 }
 
 function drawCastle(ox, oy, s){
     let bx=ox+40, by=oy+140;
 
-    // Main castle keep
+    // Main castle keep — layered stone shading for depth
+    ctx.fillStyle='#2a2a3a';
+    ctx.fillRect((bx-1)*s, (by-1)*s, 52*s, 82*s); // outline shadow
     ctx.fillStyle=castleColor;
     ctx.fillRect(bx*s, by*s, 50*s, 80*s);
-    // Bricks
-    ctx.fillStyle='#4a4a66';
+    ctx.fillStyle='rgba(255,255,255,0.06)';
+    ctx.fillRect(bx*s, by*s, 8*s, 80*s); // left-face highlight
+    ctx.fillStyle='rgba(0,0,0,0.1)';
+    ctx.fillRect((bx+42)*s, by*s, 8*s, 80*s); // right-face shadow
+    // Bricks (mortar shadow + highlight per row for texture)
     for(let r=0;r<8;r++){
+        let xOff=(r%2)*6;
+        ctx.fillStyle='#3a3a52';
+        ctx.fillRect((bx+2)*s,(by+2+r*10)*s, 46*s, 1*s); // mortar shadow line
+        ctx.fillStyle='#5a5a78';
         for(let c=0;c<4;c++){
-            let xOff=(r%2)*6;
-            ctx.fillRect((bx+2+c*12+xOff)*s,(by+2+r*10)*s, 10*s, 1*s);
+            ctx.fillRect((bx+2+c*12+xOff)*s,(by+1+r*10)*s, 10*s, 1*s); // brick highlight
+        }
+        ctx.fillStyle='#4a4a66';
+        for(let c=0;c<4;c++){
+            ctx.fillRect((bx+2+c*12+xOff)*s,(by+3+r*10)*s, 10*s, 1*s);
         }
     }
-    // Battlements
+    // Corner turrets
+    [bx-3, bx+43].forEach(cx=>{
+        ctx.fillStyle='#3a3a52';
+        ctx.fillRect((cx-1)*s,(by-14)*s, 12*s, 96*s);
+        ctx.fillStyle=castleColor;
+        ctx.fillRect(cx*s,(by-13)*s, 10*s, 94*s);
+        ctx.fillStyle='rgba(255,255,255,0.08)';
+        ctx.fillRect(cx*s,(by-13)*s, 3*s, 94*s);
+        for(let i=0;i<3;i++){
+            ctx.fillStyle=castleColor;
+            ctx.fillRect((cx+i*3.3)*s,(by-20)*s, 2.5*s, 8*s); // turret crenellations
+        }
+    });
+    // Battlements — individually shaded merlons
     for(let i=0;i<5;i++){
+        ctx.fillStyle='#3a3a52';
+        ctx.fillRect((bx+i*10-0.5)*s,(by-9)*s, 8*s, 11*s);
         ctx.fillStyle=castleColor;
         ctx.fillRect((bx+i*10)*s,(by-8)*s, 7*s, 10*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect((bx+i*10)*s,(by-8)*s, 2*s, 10*s);
     }
-    // Roof
+    // Roof — shingled with ridge highlight
+    ctx.fillStyle='#5a1522';
+    ctx.beginPath();
+    ctx.moveTo((bx+9)*s,(by-7)*s);
+    ctx.lineTo((bx+25)*s,(by-29)*s);
+    ctx.lineTo((bx+41)*s,(by-7)*s);
+    ctx.fill();
     ctx.fillStyle='#883344';
     ctx.beginPath();
     ctx.moveTo((bx+10)*s,(by-8)*s);
     ctx.lineTo((bx+25)*s,(by-28)*s);
     ctx.lineTo((bx+40)*s,(by-8)*s);
     ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.12)';
+    ctx.beginPath();
+    ctx.moveTo((bx+25)*s,(by-28)*s);
+    ctx.lineTo((bx+22)*s,(by-8)*s);
+    ctx.lineTo((bx+25)*s,(by-8)*s);
+    ctx.fill(); // ridge highlight
     ctx.fillStyle='#772233';
-    ctx.fillRect((bx+16)*s,(by-20)*s, 18*s, 1*s);
-    ctx.fillRect((bx+13)*s,(by-14)*s, 24*s, 1*s);
+    for(let r=0;r<4;r++) ctx.fillRect((bx+13+r)*s,(by-20+r*4)*s, (24-r*2)*s, 1*s); // shingle lines
 
     // Flag
     let flagW=Math.sin(animFrame*0.06)*2;
+    ctx.fillStyle='#5a0a1a';
+    ctx.fillRect((bx+23.5)*s,(by-42)*s, 2*s, 16*s); // pole shadow
     ctx.fillStyle='#aa1133';
     ctx.fillRect((bx+24)*s,(by-42)*s, 2*s, 16*s);
     ctx.fillStyle='#ee2244';
     ctx.fillRect((bx+26)*s,(by-42+flagW)*s, 12*s, 8*s);
+    ctx.fillStyle='rgba(255,255,255,0.15)';
+    ctx.fillRect((bx+26)*s,(by-42+flagW)*s, 12*s, 2*s);
     ctx.fillStyle='#ffcc00';
     ctx.fillRect((bx+29)*s,(by-40+flagW)*s, 6*s, 4*s);
 
-    // Windows
+    // Windows — arched with sill and glow
     let wGlow=Math.sin(animFrame*0.04)*0.3+0.7;
-    ctx.fillStyle=`rgba(255,220,80,${wGlow})`;
-    ctx.fillRect((bx+15)*s,(by+30)*s, 5*s, 7*s);
-    ctx.fillRect((bx+30)*s,(by+30)*s, 5*s, 7*s);
+    [15,30].forEach(wx=>{
+        ctx.fillStyle='#1a1a2a';
+        ctx.fillRect((bx+wx-1)*s,(by+29)*s, 7*s, 9*s);
+        ctx.fillStyle=`rgba(255,220,80,${wGlow})`;
+        ctx.fillRect((bx+wx)*s,(by+30)*s, 5*s, 7*s);
+        ctx.beginPath(); ctx.arc((bx+wx+2.5)*s,(by+30)*s, 2.5*s, Math.PI, 0); ctx.fill(); // arch top
+        ctx.fillStyle='#3a2a10';
+        ctx.fillRect((bx+wx+2)*s,(by+30)*s, 1*s, 7*s); // mullion
+    });
 
-    // Gate
+    // Gate — arched with wood-plank detail
+    ctx.fillStyle='#1a0d00';
+    ctx.fillRect((bx+16)*s,(by+54)*s, 18*s, 26*s);
     ctx.fillStyle='#221100';
-    ctx.fillRect((bx+17)*s,(by+55)*s, 16*s, 25*s);
+    ctx.fillRect((bx+17)*s,(by+56)*s, 16*s, 24*s);
+    ctx.beginPath(); ctx.arc((bx+25)*s,(by+56)*s, 8*s, Math.PI, 0); ctx.fill(); // arch top
+    ctx.fillStyle='#3a2005';
+    for(let i=0;i<4;i++) ctx.fillRect((bx+18+i*3.5)*s,(by+58)*s, 0.8*s, 20*s); // plank lines
     ctx.fillStyle='#442200';
     ctx.fillRect((bx+19)*s,(by+57)*s, 5*s, 23*s);
     ctx.fillRect((bx+26)*s,(by+57)*s, 5*s, 23*s);
+    ctx.fillStyle='#221100';
+    for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc((bx+21.5)*s,(by+60+i*7)*s,0.8*s,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc((bx+28.5)*s,(by+60+i*7)*s,0.8*s,0,Math.PI*2); ctx.fill(); } // studs
 
     // Torches
     if(animFrame%6<4){
@@ -734,16 +1137,39 @@ function drawCastle(ox, oy, s){
         }
     }
 
-    // Dragon perch
+    // Dragon coils around the keep's spire
     if(hasDragon){
-        ctx.fillStyle='#661133';
-        ctx.fillRect((bx+15)*s,(by-32)*s, 12*s, 6*s);
+        let t = animFrame*0.05;
+        ctx.strokeStyle='#aa2255';
+        ctx.lineWidth=4*s;
+        ctx.lineCap='round';
+        ctx.beginPath();
+        for(let i=0;i<=20;i++){
+            let py = by-5 - i*3;
+            let coilX = bx+25 + Math.sin(i*0.6+t)*13;
+            if(i===0) ctx.moveTo(coilX*s, py*s); else ctx.lineTo(coilX*s, py*s);
+        }
+        ctx.stroke();
+        ctx.strokeStyle='#661133';
+        ctx.lineWidth=1.5*s;
+        ctx.beginPath();
+        for(let i=0;i<=20;i+=2){
+            let py = by-5 - i*3;
+            let coilX = bx+25 + Math.sin(i*0.6+t)*13;
+            ctx.moveTo(coilX*s, py*s); ctx.lineTo((coilX+3)*s, (py-2)*s); // spine ridges
+        }
+        ctx.stroke();
+        // Head near the top of the coil
+        let headY = by-5-20*3;
+        let headX = bx+25 + Math.sin(20*0.6+t)*13;
         ctx.fillStyle='#aa2255';
-        ctx.fillRect((bx+17)*s,(by-36)*s, 8*s, 5*s);
+        ctx.fillRect((headX-4)*s, (headY-4)*s, 9*s, 7*s);
+        ctx.fillStyle='#ffcc00';
+        ctx.fillRect((headX-1)*s, (headY-2)*s, 2*s, 2*s); // eye
         let wingF=Math.sin(animFrame*0.08)*2;
         ctx.fillStyle='#882244';
-        ctx.fillRect((bx+12)*s,(by-34+wingF)*s, 5*s, 3*s);
-        ctx.fillRect((bx+25)*s,(by-34-wingF)*s, 5*s, 3*s);
+        ctx.fillRect((headX-10)*s,(headY+4+wingF)*s, 7*s, 3*s);
+        ctx.fillRect((headX+5)*s,(headY+4-wingF)*s, 7*s, 3*s);
     }
 
     if(hasKing){
@@ -751,14 +1177,67 @@ function drawCastle(ox, oy, s){
         ctx.fillRect((bx+22)*s,(by+15)*s, 6*s, 3*s);
         ctx.fillStyle='#ddaa00';
         ctx.fillRect((bx+23)*s,(by+18)*s, 4*s, 6*s);
+        ctx.fillStyle='#ff3366';
+        ctx.fillRect((bx+24)*s,(by+15.5)*s, 2*s, 2*s); // ruby
+    }
+
+    // Warhorn mounted on the battlements
+    if(cards.some(c=>c.id==='warhorn')){
+        ctx.fillStyle='#8a6a3a';
+        ctx.beginPath();
+        ctx.moveTo((bx-2)*s,(by-4)*s);
+        ctx.quadraticCurveTo((bx-14)*s,(by-2)*s,(bx-13)*s,(by+6)*s);
+        ctx.lineTo((bx-9)*s,(by+5)*s);
+        ctx.quadraticCurveTo((bx-10)*s,(by-1)*s,(bx-1)*s,(by-1)*s);
+        ctx.fill();
+        ctx.fillStyle='#c8a860';
+        ctx.beginPath(); ctx.arc((bx-13)*s,(by+5)*s,2.5*s,0,Math.PI*2); ctx.fill(); // bell
+    }
+
+    // Priestly halo over the keep
+    if(priestHeal){
+        let glow=0.5+Math.sin(animFrame*0.05)*0.3;
+        ctx.strokeStyle=`rgba(255,230,150,${glow})`;
+        ctx.lineWidth=2*s;
+        ctx.beginPath();
+        ctx.ellipse((bx+25)*s,(by-30)*s, 9*s, 3*s, 0, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.fillStyle=`rgba(255,240,190,${glow*0.6})`;
+        ctx.beginPath();
+        ctx.arc((bx+25)*s,(by-30)*s, 6*s, 0, Math.PI*2);
+        ctx.fill();
+    }
+
+    // Meteor orbiting the keep
+    if(hasMeteor){
+        let orbit = animFrame*0.03;
+        let mx = bx+25 + Math.cos(orbit)*30;
+        let my = by-10 + Math.sin(orbit)*10;
+        ctx.fillStyle='#553322';
+        ctx.beginPath(); ctx.arc(mx*s, my*s, 4*s, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle='#ff8800';
+        ctx.beginPath(); ctx.arc((mx-4)*s, (my-1)*s, 1.5*s, 0, Math.PI*2); ctx.fill(); // trailing ember
     }
 }
 
 function drawTower(t, tx, ty, s){
     let lvlIndicator = t.level > 1;
+    // Stretch the tower 20% taller, anchored at its base so it grows upward
+    // in place rather than sinking into the ground.
+    let groundY = (ty+24)*s;
+    ctx.save();
+    ctx.translate(0, groundY);
+    ctx.scale(1, 1.2);
+    ctx.translate(0, -groundY);
     if(t.id==='archer'){
+        ctx.fillStyle='#4a3a20';
+        ctx.fillRect((tx-1)*s,(ty-5)*s, 22*s, 30*s); // outline
         ctx.fillStyle='#6b5530';
         ctx.fillRect(tx*s,(ty-4)*s, 20*s, 28*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(tx*s,(ty-4)*s, 4*s, 28*s); // stone highlight
+        ctx.fillStyle='rgba(0,0,0,0.12)';
+        for(let r=0;r<5;r++) ctx.fillRect(tx*s,(ty-4+r*6)*s, 20*s, 1*s); // mortar lines
         ctx.fillStyle='#8b7040';
         ctx.fillRect((tx+2)*s,ty*s, 16*s, 3*s);
         ctx.fillRect((tx+2)*s,(ty+12)*s, 16*s, 3*s);
@@ -767,29 +1246,69 @@ function drawTower(t, tx, ty, s){
         ctx.fillStyle='#4a3a20';
         ctx.fillRect((tx+3)*s,(ty-10)*s, 14*s, 8*s);
         ctx.fillRect((tx+6)*s,(ty-14)*s, 8*s, 6*s);
+        ctx.fillStyle='#6b5530';
+        ctx.fillRect((tx+6)*s,(ty-14)*s, 8*s, 1.5*s); // roof ridge
+        ctx.fillStyle='#4a3a20';
+        for(let i=0;i<3;i++) ctx.fillRect((tx+3+i*5)*s,(ty-13)*s, 3*s, 3*s); // battlement crenellations
     } else if(t.id==='ballista'){
+        ctx.fillStyle='#445566';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 24*s, 24*s); // outline
         ctx.fillStyle='#667788';
         ctx.fillRect(tx*s,ty*s, 22*s, 22*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(tx*s,ty*s, 22*s, 4*s); // top edge highlight
+        ctx.fillStyle='#556677';
+        for(let i=0;i<3;i++) ctx.fillRect((tx+2+i*7)*s,(ty+3)*s, 4*s, 4*s); // stone block seams
         ctx.fillStyle='#556677';
         ctx.fillRect((tx+3)*s,(ty-6)*s, 16*s, 8*s);
+        ctx.fillStyle='#445566';
+        ctx.fillRect((tx+3)*s,(ty-6)*s, 16*s, 2*s); // platform lip shadow
         ctx.fillStyle='#aa8844';
         ctx.fillRect((tx-3)*s,(ty-2)*s, 8*s, 3*s);
         ctx.fillRect((tx+17)*s,(ty-2)*s, 8*s, 3*s);
+        ctx.fillStyle='#ccaa66';
+        ctx.fillRect((tx-3)*s,(ty-2)*s, 8*s, 1*s);
+        ctx.fillRect((tx+17)*s,(ty-2)*s, 8*s, 1*s);
         ctx.fillStyle='#333';
         ctx.fillRect((tx+8)*s,(ty-4)*s, 6*s, 5*s);
+        ctx.fillStyle='#777';
+        ctx.fillRect((tx+10)*s,(ty-4)*s, 1.5*s, 5*s); // firing groove
     } else if(t.id==='cannon'){
+        ctx.fillStyle='#3a3a2a';
+        ctx.fillRect((tx-1)*s,(ty+5)*s, 26*s, 20*s); // outline
         ctx.fillStyle='#555544';
         ctx.fillRect(tx*s,(ty+6)*s, 24*s, 18*s);
+        ctx.fillStyle='rgba(255,255,255,0.08)';
+        ctx.fillRect(tx*s,(ty+6)*s, 24*s, 4*s); // top highlight
+        ctx.fillStyle='#3f3f30';
+        ctx.beginPath(); ctx.arc((tx+4)*s,(ty+10)*s,1.2*s,0,Math.PI*2); ctx.fill(); // rivets
+        ctx.beginPath(); ctx.arc((tx+20)*s,(ty+10)*s,1.2*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc((tx+4)*s,(ty+20)*s,1.2*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc((tx+20)*s,(ty+20)*s,1.2*s,0,Math.PI*2); ctx.fill();
         ctx.fillStyle='#333322';
         ctx.fillRect((tx+3)*s,(ty-2)*s, 18*s, 12*s);
+        ctx.fillStyle='#454534';
+        ctx.fillRect((tx+3)*s,(ty-2)*s, 18*s, 3*s); // barrel-housing highlight
         ctx.fillStyle='#222211';
         ctx.fillRect((tx+18)*s,(ty+1)*s, 12*s, 6*s);
+        ctx.fillStyle='#3a3a2a';
+        ctx.fillRect((tx+18)*s,(ty+1)*s, 12*s, 1.5*s); // barrel highlight
+        ctx.fillStyle='#111';
+        ctx.fillRect((tx+27)*s,(ty+2)*s, 3*s, 4*s); // muzzle
         ctx.fillStyle='#443322';
         ctx.fillRect((tx+2)*s,(ty+22)*s, 6*s, 6*s);
         ctx.fillRect((tx+16)*s,(ty+22)*s, 6*s, 6*s);
     } else if(t.id==='firemage'){
+        ctx.fillStyle='#8a2c00';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 20*s, 26*s); // outline
         ctx.fillStyle='#cc4400';
         ctx.fillRect(tx*s,ty*s, 18*s, 24*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 24*s); // highlight
+        ctx.fillStyle='rgba(0,0,0,0.12)';
+        for(let r=0;r<4;r++) ctx.fillRect(tx*s,(ty+r*6)*s, 18*s, 1*s); // brick lines
+        ctx.fillStyle='#a83a00';
+        ctx.beginPath(); ctx.moveTo(tx*s,(ty+24)*s); ctx.lineTo((tx+9)*s,(ty+30)*s); ctx.lineTo((tx+18)*s,(ty+24)*s); ctx.fill(); // base flare
         ctx.fillStyle='#ff6600';
         ctx.fillRect((tx+4)*s,(ty-10)*s, 10*s, 12*s);
         let flicker=Math.sin(animFrame*0.15)*2;
@@ -797,9 +1316,18 @@ function drawTower(t, tx, ty, s){
         ctx.fillRect((tx+6)*s,(ty-16+flicker)*s, 6*s, 6*s);
         ctx.fillStyle='#ff4400';
         ctx.fillRect((tx+7)*s,(ty-20+flicker)*s, 4*s, 5*s);
+        drawWizardFigure(tx, ty-30, s, '#8a1a1a', '#ffaa00', animFrame); // fire wizard atop the spire
     } else if(t.id==='icemage'){
+        ctx.fillStyle='#155a80';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 20*s, 26*s); // outline
         ctx.fillStyle='#2288bb';
         ctx.fillRect(tx*s,ty*s, 18*s, 24*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 24*s); // highlight
+        ctx.fillStyle='rgba(255,255,255,0.08)';
+        for(let r=0;r<4;r++) ctx.fillRect(tx*s,(ty+r*6)*s, 18*s, 1*s); // ice-brick lines
+        ctx.fillStyle='#0f4a68';
+        ctx.beginPath(); ctx.moveTo(tx*s,(ty+24)*s); ctx.lineTo((tx+9)*s,(ty+30)*s); ctx.lineTo((tx+18)*s,(ty+24)*s); ctx.fill(); // base flare
         ctx.fillStyle='#44ccee';
         ctx.fillRect((tx+3)*s,(ty-12)*s, 12*s, 16*s);
         ctx.fillRect((tx+6)*s,(ty-18)*s, 6*s, 8*s);
@@ -807,18 +1335,66 @@ function drawTower(t, tx, ty, s){
             ctx.fillStyle='#ffffff';
             ctx.fillRect((tx+7)*s,(ty-8)*s, 3*s, 3*s);
         }
+        drawWizardFigure(tx, ty-30, s, '#0f3a55', '#aaeeff', animFrame); // ice witch atop the spire
     } else if(t.id==='axeman'){
+        ctx.fillStyle='#4a2f1a';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 22*s, 24*s); // outline
         ctx.fillStyle='#7a5533';
         ctx.fillRect(tx*s,ty*s, 20*s, 22*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 22*s); // highlight
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        for(let i=0;i<3;i++) ctx.fillRect((tx+2+i*6)*s,ty*s, 1*s, 22*s); // log-wall texture
         ctx.fillStyle='#5a3a22';
         ctx.fillRect((tx+2)*s,(ty-6)*s, 16*s, 8*s);
+        ctx.fillStyle='#3a2515';
+        ctx.fillRect((tx+2)*s,(ty-6)*s, 16*s, 2*s); // roof shadow
         ctx.fillStyle='#aaaaaa';
         ctx.fillRect((tx+3)*s,(ty+5)*s, 4*s, 10*s);
         ctx.fillRect((tx+13)*s,(ty+5)*s, 4*s, 10*s);
+        ctx.fillStyle='#dddddd';
+        ctx.fillRect((tx+3)*s,(ty+5)*s, 1.5*s, 10*s); // blade glint
+        ctx.fillRect((tx+13)*s,(ty+5)*s, 1.5*s, 10*s);
+    } else if(t.id==='lightning'){
+        ctx.fillStyle='#554400';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 20*s, 26*s); // outline
+        ctx.fillStyle='#887711';
+        ctx.fillRect(tx*s,ty*s, 18*s, 24*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 24*s);
+        ctx.fillStyle='#333';
+        ctx.fillRect((tx+4)*s,(ty-10)*s, 10*s, 12*s); // coil housing
+        ctx.strokeStyle='#ffee44';
+        ctx.lineWidth=Math.max(1,s*0.7);
+        ctx.beginPath();
+        ctx.moveTo((tx+9)*s,(ty-16)*s); ctx.lineTo((tx+6)*s,(ty-9)*s); ctx.lineTo((tx+11)*s,(ty-8)*s); ctx.lineTo((tx+7)*s,(ty-1)*s);
+        ctx.stroke(); // rod
+        let spark=animFrame%12<3;
+        if(spark){
+            ctx.fillStyle='#ffffcc';
+            ctx.beginPath(); ctx.arc((tx+9)*s,(ty-16)*s, 2.5*s, 0, Math.PI*2); ctx.fill();
+        }
+    } else if(t.id==='poison'){
+        ctx.fillStyle='#2f3a1a';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 20*s, 26*s); // outline
+        ctx.fillStyle='#4f6a2a';
+        ctx.fillRect(tx*s,ty*s, 18*s, 24*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 24*s);
+        ctx.fillStyle='#3a4a1a';
+        ctx.fillRect((tx+3)*s,(ty-8)*s, 12*s, 10*s); // cauldron stand
+        ctx.fillStyle='#556b2f';
+        ctx.beginPath(); ctx.ellipse((tx+9)*s,(ty-9)*s, 7*s, 4*s, 0, 0, Math.PI*2); ctx.fill(); // cauldron rim
+        let bubble=Math.sin(animFrame*0.15)*2;
+        ctx.fillStyle='#88cc44';
+        ctx.globalAlpha=0.6;
+        ctx.beginPath(); ctx.arc((tx+9)*s,(ty-13+bubble)*s, 2.5*s, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha=1;
     } else {
         ctx.fillStyle=t.color||'#888';
         ctx.fillRect(tx*s,(ty-6)*s, 18*s, 28*s);
     }
+    ctx.restore();
     // Level indicator
     if(lvlIndicator){
         ctx.fillStyle='#ffcc00';
@@ -826,6 +1402,36 @@ function drawTower(t, tx, ty, s){
             ctx.fillRect((tx+2+i*4)*s,(ty-18)*s, 3*s, 3*s);
         }
     }
+}
+
+// A small robed figure standing atop a mage tower's spire, used to visually
+// distinguish Fire Mage (red robe) from Ice Mage (blue robe) towers.
+function drawWizardFigure(tx, ty, s, robeColor, glowColor, animFrame){
+    let sway = Math.sin(animFrame*0.06)*1.2;
+    ctx.fillStyle=robeColor;
+    ctx.fillRect((tx+6+sway)*s, ty*s, 6*s, 9*s); // robe body
+    ctx.beginPath();
+    ctx.moveTo((tx+6+sway)*s, ty*s);
+    ctx.lineTo((tx+3+sway)*s, (ty+9)*s);
+    ctx.lineTo((tx+15+sway)*s, (ty+9)*s);
+    ctx.lineTo((tx+12+sway)*s, ty*s);
+    ctx.fill(); // robe skirt flare
+    ctx.fillStyle='#e8c9a0';
+    ctx.fillRect((tx+7+sway)*s, (ty-4)*s, 4*s, 4*s); // head
+    ctx.fillStyle=robeColor;
+    ctx.beginPath();
+    ctx.moveTo((tx+6+sway)*s,(ty-4)*s);
+    ctx.lineTo((tx+9+sway)*s,(ty-10)*s);
+    ctx.lineTo((tx+12+sway)*s,(ty-4)*s);
+    ctx.fill(); // pointed hat
+    ctx.fillStyle=glowColor;
+    ctx.globalAlpha=0.6+Math.sin(animFrame*0.1)*0.3;
+    ctx.beginPath();
+    ctx.arc((tx+16+sway)*s, (ty+2)*s, 2.5*s, 0, Math.PI*2);
+    ctx.fill(); // orb held out
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#5a4a30';
+    ctx.fillRect((tx+15+sway)*s, (ty+2)*s, 1*s, 8*s); // staff
 }
 
 function drawEnemy(e, ox, oy, s){
@@ -844,8 +1450,12 @@ function drawEnemy(e, ox, oy, s){
     let frozen=e.frozen>0;
 
     if(e.type==='goblin'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#3a6a2a';
+        ctx.fillRect(ex+1, ey+bob+1, 10*s, 12*s); // shadow/outline layer
         ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
         ctx.fillRect(ex+2, (ey+bob+2), 8*s, 10*s);
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.fillRect(ex+3, ey+bob+2, 3*s, 6*s); // highlight
         ctx.fillStyle=frozen?'#88ccff':'#5aaa4a';
         ctx.fillRect(ex+3*s,(ey+bob-5)*s, 6*s, 7*s);
         ctx.fillStyle=frozen?'#88ccff':'#3a7a2a';
@@ -854,50 +1464,85 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillStyle='#ff0';
         ctx.fillRect(ex+4, ey+bob-3, 2*s, 2*s);
         ctx.fillRect(ex+7, ey+bob-3, 2*s, 2*s);
+        ctx.fillStyle='#fff';
+        ctx.fillRect(ex+4, ey+bob+1, 4*s, 1*s); // teeth
         ctx.fillStyle='#cccccc';
         ctx.fillRect(ex-1, ey+bob+5, 2*s, 6*s);
-        ctx.fillStyle=frozen?'#88ccff':'#3a6a2a';
-        ctx.fillRect(ex+2, ey+bob+12, 3*s, 4*s);
-        ctx.fillRect(ex+7, ey+bob+12, 3*s, 4*s);
+        ctx.fillStyle='#eeeeee';
+        ctx.fillRect(ex-1, ey+bob+4, 2*s, 1*s); // blade glint
+        ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
+        ctx.fillRect(ex+2, ey+bob+11, 2.5*s, 2*s); // leg (torso-toned, short)
+        ctx.fillRect(ex+7.5, ey+bob+11, 2.5*s, 2*s);
+        ctx.fillStyle=frozen?'#88ccff':'#3a2a18';
+        ctx.fillRect(ex+2, ey+bob+13, 2.5*s, 2*s); // boots — distinct color so legs read separately from the torso
+        ctx.fillRect(ex+7.5, ey+bob+13, 2.5*s, 2*s);
     } else if(e.type==='skeleton'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#bbbaa8';
+        ctx.fillRect(ex+2, ey+bob+1, 9*s, 13*s); // outline layer
         ctx.fillStyle=frozen?'#88ccff':'#dddccc';
         ctx.fillRect(ex+3, ey+bob+2, 7*s, 11*s);
         ctx.fillStyle=frozen?'#88ccff':'#eeeedd';
         ctx.fillRect(ex+4, ey+bob-5, 5*s, 6*s);
+        ctx.fillStyle='rgba(255,255,255,0.25)';
+        ctx.fillRect(ex+4, ey+bob-5, 2*s, 5*s); // skull highlight
         ctx.fillStyle='#220000';
         ctx.fillRect(ex+5, ey+bob-3, 1*s, 2*s);
         ctx.fillRect(ex+7, ey+bob-3, 1*s, 2*s);
+        ctx.fillStyle='#443300';
+        ctx.fillRect(ex+5, ey+bob, 3*s, 1*s); // jaw line
         ctx.fillStyle='#bbbbaa';
         for(let r=0;r<3;r++) ctx.fillRect(ex+4, ey+bob+3+r*3, 5*s, 1*s);
+        ctx.fillStyle='#999988';
+        for(let r=0;r<3;r++) ctx.fillRect(ex+4, ey+bob+4+r*3, 5*s, 0.6*s); // rib shading
         ctx.fillStyle='#666688';
         ctx.fillRect(ex-2, ey+bob+3, 4*s, 8*s);
+        ctx.fillStyle='rgba(180,180,255,0.4)';
+        ctx.fillRect(ex-2, ey+bob+3, 1.5*s, 8*s); // shield edge glow
         ctx.fillStyle='#aaaacc';
         ctx.fillRect(ex+11, ey+bob, 2*s, 12*s);
+        ctx.fillStyle='#dddeee';
+        ctx.fillRect(ex+11, ey+bob-1, 4*s, 2*s); // spear tip
         ctx.fillStyle=frozen?'#88ccff':'#ccccbb';
         ctx.fillRect(ex+4, ey+bob+13, 2*s, 5*s);
         ctx.fillRect(ex+7, ey+bob+13, 2*s, 5*s);
     } else if(e.type==='knight'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#3f4d77';
+        ctx.fillRect(ex+1, ey+bob, 12*s, 15*s); // armor outline
         ctx.fillStyle=frozen?'#88ccff':'#6677aa';
         ctx.fillRect(ex+2, ey+bob+1, 10*s, 13*s);
+        ctx.fillStyle='rgba(255,255,255,0.18)';
+        ctx.fillRect(ex+3, ey+bob+2, 3*s, 10*s); // chestplate highlight
         ctx.fillStyle=frozen?'#88ccff':'#5566aa';
         ctx.fillRect(ex+3, ey+bob-6, 8*s, 8*s);
+        ctx.fillStyle='#333355';
+        ctx.fillRect(ex+3, ey+bob-6, 8*s, 2*s); // helmet brim shading
         ctx.fillStyle='#111';
         ctx.fillRect(ex+5, ey+bob-3, 4*s, 2*s);
         ctx.fillStyle='#cc2244';
         ctx.fillRect(ex+6, ey+bob-10, 3*s, 5*s);
+        ctx.fillStyle='#ee5577';
+        ctx.fillRect(ex+7, ey+bob-10, 1*s, 5*s); // plume highlight
         ctx.fillStyle=frozen?'#88ccff':'#778bbb';
         ctx.fillRect(ex, ey+bob+1, 3*s, 5*s);
         ctx.fillRect(ex+11, ey+bob+1, 3*s, 5*s);
         ctx.fillStyle='#ccccdd';
         ctx.fillRect(ex+13, ey+bob-4, 2*s, 18*s);
+        ctx.fillStyle='#eeeeff';
+        ctx.fillRect(ex+13, ey+bob-4, 0.8*s, 18*s); // sword edge glint
         ctx.fillStyle='#aa8833';
         ctx.fillRect(ex+12, ey+bob+2, 4*s, 2*s);
         ctx.fillStyle=frozen?'#88ccff':'#556699';
         ctx.fillRect(ex+3, ey+bob+14, 4*s, 5*s);
         ctx.fillRect(ex+8, ey+bob+14, 4*s, 5*s);
     } else if(e.type==='wolf'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#3d3025';
+        ctx.fillRect(ex+1, ey+bob+3, 16*s, 9*s); // body outline
         ctx.fillStyle=frozen?'#88ccff':'#554433';
         ctx.fillRect(ex+2, ey+bob+4, 14*s, 7*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(ex+2, ey+bob+4, 14*s, 2*s); // back highlight
+        ctx.fillStyle=frozen?'#88ccff':'#443322';
+        for(let i=0;i<4;i++) ctx.fillRect(ex+3+i*3, ey+bob+5, 1*s, 5*s); // fur texture
         ctx.fillStyle=frozen?'#88ccff':'#665544';
         ctx.fillRect(ex-2, ey+bob+2, 6*s, 5*s);
         ctx.fillStyle=frozen?'#88ccff':'#443322';
@@ -905,6 +1550,8 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+2, ey+bob-1, 2*s, 3*s);
         ctx.fillStyle='#ff3300';
         ctx.fillRect(ex-1, ey+bob+3, 2*s, 2*s);
+        ctx.fillStyle='rgba(255,150,80,0.6)';
+        ctx.fillRect(ex-1, ey+bob+3, 1*s, 1*s); // eye glint
         ctx.fillStyle=frozen?'#88ccff':'#443322';
         ctx.fillRect(ex+2, ey+bob+11, 2*s, 4*s);
         ctx.fillRect(ex+6, ey+bob+11, 2*s, 4*s);
@@ -912,34 +1559,352 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+14, ey+bob+11, 2*s, 4*s);
         ctx.fillRect(ex+16, ey+bob+2, 4*s, 2*s);
     } else if(e.type==='siege'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#453820';
+        ctx.fillRect(ex-1, ey+bob-1, 24*s, 16*s); // frame outline
         ctx.fillStyle=frozen?'#88ccff':'#5a4a30';
         ctx.fillRect(ex, ey+bob, 22*s, 14*s);
+        ctx.fillStyle='rgba(255,255,255,0.08)';
+        for(let i=0;i<4;i++) ctx.fillRect(ex+2+i*5, ey+bob+1, 1*s, 12*s); // wood grain
         ctx.fillStyle='#3a3020';
         ctx.fillRect(ex-1, ey+bob-4, 24*s, 5*s);
+        ctx.fillStyle='#8a7a4a';
+        ctx.fillRect(ex-1, ey+bob-4, 24*s, 1.5*s); // roof highlight
         ctx.fillStyle='#2a2010';
         ctx.fillRect(ex-4, ey+bob+5, 10*s, 3*s);
         ctx.fillStyle='#888888';
         ctx.fillRect(ex-6, ey+bob+4, 3*s, 5*s);
+        ctx.fillStyle='#cccccc';
+        ctx.fillRect(ex-6, ey+bob+4, 3*s, 1*s); // ram-tip glint
+        ctx.fillStyle='#3a2a15';
+        ctx.beginPath(); ctx.arc(ex+6,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill(); // rivets
+        ctx.beginPath(); ctx.arc(ex+16,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill();
         ctx.fillStyle='#443322';
         ctx.fillRect(ex+2, ey+bob+14, 5*s, 5*s);
         ctx.fillRect(ex+15, ey+bob+14, 5*s, 5*s);
+    } else if(e.type==='wagon'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#4a331d';
+        ctx.fillRect(ex-1, ey+bob+1, 22*s, 11*s); // cart outline
+        ctx.fillStyle=frozen?'#88ccff':'#6a4a2a';
+        ctx.fillRect(ex, ey+bob+2, 20*s, 10*s);
+        ctx.fillStyle=frozen?'#88ccff':'#8a6a3a';
+        ctx.fillRect(ex+2, ey+bob-4, 16*s, 7*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(ex+2, ey+bob-4, 16*s, 2*s); // canvas highlight
+        ctx.fillStyle='#ffcc00';
+        ctx.fillRect(ex+5, ey+bob-2, 4*s, 4*s);
+        ctx.fillRect(ex+11, ey+bob-2, 4*s, 4*s);
+        ctx.fillStyle='rgba(255,255,255,0.5)';
+        ctx.fillRect(ex+5, ey+bob-2, 1.5*s, 1.5*s); // gold glint
+        ctx.fillRect(ex+11, ey+bob-2, 1.5*s, 1.5*s);
+        ctx.fillStyle='#e8d060';
+        ctx.fillRect(ex+8, ey+bob-6, 4*s, 3*s);
+        ctx.fillStyle='#3a2a18';
+        ctx.beginPath(); ctx.arc(ex+4, ey+bob+13, 4*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+16, ey+bob+13, 4*s, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle='#c8a838';
+        ctx.beginPath(); ctx.arc(ex+4, ey+bob+13, 1.5*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+16, ey+bob+13, 1.5*s, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle='#5a4a28';
+        ctx.lineWidth=Math.max(1,s*0.4);
+        for(let a=0;a<3;a++){
+            let ang=a*Math.PI/3;
+            ctx.beginPath(); ctx.moveTo(ex+4,ey+bob+13); ctx.lineTo(ex+4+Math.cos(ang)*3.5*s, ey+bob+13+Math.sin(ang)*3.5*s); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex+16,ey+bob+13); ctx.lineTo(ex+16+Math.cos(ang)*3.5*s, ey+bob+13+Math.sin(ang)*3.5*s); ctx.stroke();
+        }
+    } else if(e.type==='goblin_scout'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#1e4a6a';
+        ctx.fillRect(ex+1, ey+bob+2, 8*s, 10*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#2e6a9a';
+        ctx.fillRect(ex+2, ey+bob+3, 6*s, 8*s);
+        ctx.fillStyle='rgba(255,255,255,0.18)';
+        ctx.fillRect(ex+2, ey+bob+3, 2*s, 5*s);
+        ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
+        ctx.fillRect(ex+2*s,(ey+bob-4)*s, 5*s, 6*s);
+        ctx.fillStyle='#dd3333';
+        ctx.fillRect(ex+1, ey+bob-6, 6*s, 2*s); // headband
+        ctx.fillStyle='#ff0';
+        ctx.fillRect(ex+3, ey+bob-2, 1.5*s, 1.5*s);
+        ctx.fillRect(ex+5, ey+bob-2, 1.5*s, 1.5*s);
+        ctx.fillStyle='#cccccc';
+        ctx.fillRect(ex-2, ey+bob+4, 1.5*s, 5*s); // twin daggers
+        ctx.fillRect(ex+8, ey+bob+4, 1.5*s, 5*s);
+        ctx.fillStyle=frozen?'#88ccff':'#1e4a6a';
+        ctx.fillRect(ex+1, ey+bob+10, 2*s, 4*s);
+        ctx.fillRect(ex+5, ey+bob+10, 2*s, 4*s);
+    } else if(e.type==='goblin_armored'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#2a4a1a';
+        ctx.fillRect(ex, ey+bob, 12*s, 14*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#3a6a2a';
+        ctx.fillRect(ex+1, ey+bob+1, 10*s, 12*s);
+        ctx.fillStyle='#777777';
+        ctx.fillRect(ex+1, ey+bob+2, 10*s, 5*s); // chest plate
+        ctx.fillStyle='#999999';
+        ctx.fillRect(ex+1, ey+bob+2, 10*s, 1.5*s); // plate highlight
+        ctx.fillStyle='#555555';
+        ctx.fillRect(ex+2, ey+bob-6, 8*s, 7*s); // helm
+        ctx.fillStyle='#333';
+        ctx.fillRect(ex+4, ey+bob-3, 4*s, 1.5*s); // visor slit
+        ctx.fillStyle='#ff2222';
+        ctx.fillRect(ex+5, ey+bob-3, 1*s, 1*s); // eye glow through visor
+        ctx.fillStyle='#888888';
+        ctx.fillRect(ex-2, ey+bob+3, 4*s, 8*s); // mace
+        ctx.fillStyle='#aaaaaa';
+        ctx.beginPath(); ctx.arc(ex,ey+bob+3,2.5*s,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=frozen?'#88ccff':'#2a4a1a';
+        ctx.fillRect(ex+2, ey+bob+13, 3*s, 4*s);
+        ctx.fillRect(ex+7, ey+bob+13, 3*s, 4*s);
+    } else if(e.type==='wolf_dire'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#241c14';
+        ctx.fillRect(ex, ey+bob+2, 20*s, 11*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#3a2a1a';
+        ctx.fillRect(ex+1, ey+bob+3, 18*s, 9*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(ex+1, ey+bob+3, 18*s, 2*s);
+        ctx.fillStyle=frozen?'#88ccff':'#221a10';
+        for(let i=0;i<5;i++) ctx.fillRect(ex+2+i*3.5, ey+bob+4, 1.5*s, 6*s); // dark fur streaks
+        ctx.fillStyle=frozen?'#88ccff':'#4a3624';
+        ctx.fillRect(ex-3, ey+bob+1, 8*s, 6*s);
+        ctx.fillStyle=frozen?'#88ccff':'#221a10';
+        ctx.fillRect(ex-3, ey+bob-2, 3*s, 4*s);
+        ctx.fillRect(ex+2, ey+bob-2, 3*s, 4*s);
+        ctx.fillStyle='#ff0000';
+        ctx.fillRect(ex-1, ey+bob+2, 2.5*s, 2.5*s);
+        ctx.fillStyle='rgba(255,80,80,0.7)';
+        ctx.fillRect(ex-1, ey+bob+2, 1.2*s, 1.2*s); // glow
+        ctx.fillStyle='#eeeeee';
+        ctx.fillRect(ex+3, ey+bob+6, 3*s, 1.2*s); // fangs
+        ctx.fillStyle=frozen?'#88ccff':'#221a10';
+        ctx.fillRect(ex+2, ey+bob+12, 3*s, 5*s);
+        ctx.fillRect(ex+7, ey+bob+12, 3*s, 5*s);
+        ctx.fillRect(ex+12, ey+bob+12, 3*s, 5*s);
+        ctx.fillRect(ex+16, ey+bob+12, 3*s, 5*s);
+        ctx.fillRect(ex+18, ey+bob+1, 5*s, 3*s);
+    } else if(e.type==='shade'){
+        let flicker=0.55+Math.sin(animFrame*0.2)*0.2;
+        ctx.globalAlpha=flicker;
+        ctx.fillStyle='#2a1240';
+        ctx.beginPath();
+        ctx.moveTo(ex+6, ey+bob-6);
+        ctx.lineTo(ex+2, ey+bob+16+Math.sin(animFrame*0.15)*2);
+        ctx.lineTo(ex+10, ey+bob+12);
+        ctx.lineTo(ex+18, ey+bob+16+Math.cos(animFrame*0.15)*2);
+        ctx.lineTo(ex+14, ey+bob-6);
+        ctx.fill(); // wispy robed silhouette, no distinct legs
+        ctx.fillStyle='#4a2a70';
+        ctx.fillRect(ex+5, ey+bob-8, 10*s, 6*s); // head/hood
+        ctx.globalAlpha=1;
+        ctx.fillStyle='#cc88ff';
+        ctx.globalAlpha=0.7+Math.sin(animFrame*0.25)*0.3;
+        ctx.fillRect(ex+7, ey+bob-5, 2*s, 2*s);
+        ctx.fillRect(ex+11, ey+bob-5, 2*s, 2*s);
+        ctx.globalAlpha=1;
+    } else if(e.type==='leshy'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#3a2a18';
+        ctx.fillRect(ex, ey+bob-2, 14*s, 18*s); // bark-body outline
+        ctx.fillStyle=frozen?'#88ccff':'#5a4028';
+        ctx.fillRect(ex+1, ey+bob-1, 12*s, 16*s);
+        ctx.fillStyle='rgba(255,255,255,0.08)';
+        ctx.fillRect(ex+1, ey+bob-1, 3*s, 16*s);
+        ctx.fillStyle=frozen?'#88ccff':'#2a4a1a';
+        for(let i=0;i<3;i++){
+            ctx.beginPath();
+            ctx.moveTo(ex+3+i*3, ey+bob-1);
+            ctx.lineTo(ex+1+i*3, ey+bob-6);
+            ctx.lineTo(ex+5+i*3, ey+bob-3);
+            ctx.fill();
+        } // leafy crown
+        ctx.fillStyle='#6a5030';
+        ctx.fillRect(ex+2, ey+bob+2, 2*s, 10*s);
+        ctx.fillRect(ex+9, ey+bob+2, 2*s, 10*s); // bark ridges
+        ctx.fillStyle='#ffaa22';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.1)*0.3;
+        ctx.fillRect(ex+4, ey+bob+3, 2*s, 2*s);
+        ctx.fillRect(ex+8, ey+bob+3, 2*s, 2*s);
+        ctx.globalAlpha=1;
+        ctx.strokeStyle='#3a5a1a';
+        ctx.lineWidth=Math.max(1,s*0.6);
+        ctx.beginPath(); ctx.moveTo(ex-2,ey+bob+6); ctx.quadraticCurveTo(ex-6,ey+bob+10,ex-3,ey+bob+16); ctx.stroke(); // thorny vine
+        ctx.fillStyle=frozen?'#88ccff':'#4a3520';
+        ctx.fillRect(ex+2, ey+bob+14, 3*s, 5*s);
+        ctx.fillRect(ex+8, ey+bob+14, 3*s, 5*s);
+    } else if(e.type==='wisphawk'){
+        let flap=Math.sin(animFrame*0.3)*4;
+        ctx.fillStyle=frozen?'#6bb0e0':'#cccccc';
+        ctx.globalAlpha=0.55;
+        ctx.beginPath();
+        ctx.moveTo(ex+7, ey+bob+4);
+        ctx.lineTo(ex-6, ey+bob+flap);
+        ctx.lineTo(ex+2, ey+bob+8);
+        ctx.lineTo(ex+7, ey+bob+4);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(ex+7, ey+bob+4);
+        ctx.lineTo(ex+20, ey+bob-flap);
+        ctx.lineTo(ex+12, ey+bob+8);
+        ctx.fill();
+        ctx.globalAlpha=1;
+        ctx.fillStyle=frozen?'#88ccff':'#eeeeee';
+        ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+5, 6*s, 3.5*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle='#ffdd88';
+        ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+4); ctx.lineTo(ex-2,ey+bob+5); ctx.lineTo(ex+2,ey+bob+6); ctx.fill(); // beak
+        ctx.fillStyle='#332211';
+        ctx.fillRect(ex+5, ey+bob+3, 1.5*s, 1.5*s);
+    } else if(e.type==='brambletreant'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#2e2010';
+        ctx.fillRect(ex, ey+bob-4, 16*s, 22*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#4a3418';
+        ctx.fillRect(ex+1, ey+bob-3, 14*s, 20*s);
+        ctx.fillStyle='rgba(255,255,255,0.06)';
+        ctx.fillRect(ex+1, ey+bob-3, 3*s, 20*s);
+        ctx.fillStyle=frozen?'#88ccff':'#3a5a1a';
+        for(let i=0;i<4;i++){
+            ctx.beginPath();
+            ctx.moveTo(ex+2+i*3, ey+bob-3);
+            ctx.lineTo(ex-1+i*3, ey+bob-10);
+            ctx.lineTo(ex+5+i*3, ey+bob-6);
+            ctx.fill();
+        } // dense canopy
+        ctx.fillStyle='#221a10';
+        ctx.fillRect(ex+3, ey+bob+3, 1.5*s, 1.5*s);
+        ctx.fillRect(ex+10, ey+bob+3, 1.5*s, 1.5*s); // knot eyes
+        ctx.strokeStyle='#5a4020';
+        ctx.lineWidth=Math.max(1,s*0.5);
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+6+i*4); ctx.lineTo(ex+14,ey+bob+8+i*4); ctx.stroke(); }
+        ctx.fillStyle=frozen?'#88ccff':'#2e2010';
+        ctx.fillRect(ex+2, ey+bob+16, 4*s, 6*s);
+        ctx.fillRect(ex+10, ey+bob+16, 4*s, 6*s);
+    } else if(e.type==='embersalamander'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#5a1a0a';
+        ctx.fillRect(ex, ey+bob+4, 18*s, 9*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#aa3311';
+        ctx.fillRect(ex+1, ey+bob+5, 16*s, 7*s);
+        ctx.fillStyle='#ff6622';
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.2)*0.3;
+        for(let i=0;i<4;i++) ctx.fillRect(ex+2+i*4, ey+bob+6, 2*s, 5*s); // glowing back segments
+        ctx.globalAlpha=1;
+        ctx.fillStyle=frozen?'#88ccff':'#aa3311';
+        ctx.fillRect(ex-3, ey+bob+5, 6*s, 5*s); // head
+        ctx.fillStyle='#ffdd00';
+        ctx.fillRect(ex-1, ey+bob+6, 1.5*s, 1.5*s);
+        ctx.strokeStyle='#ff4400';
+        ctx.lineWidth=Math.max(1,s*0.6);
+        ctx.beginPath(); ctx.moveTo(ex+16,ey+bob+8); ctx.quadraticCurveTo(ex+22,ey+bob+6,ex+21,ey+bob+12); ctx.stroke(); // tail flame
+        ctx.fillStyle=frozen?'#88ccff':'#5a1a0a';
+        ctx.fillRect(ex+2, ey+bob+12, 2*s, 4*s);
+        ctx.fillRect(ex+8, ey+bob+12, 2*s, 4*s);
+        ctx.fillRect(ex+13, ey+bob+12, 2*s, 4*s);
+    } else if(e.type==='irongolem'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#2a2a30';
+        ctx.fillRect(ex-1, ey+bob-3, 18*s, 22*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#5a5a66';
+        ctx.fillRect(ex, ey+bob-2, 16*s, 20*s);
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.fillRect(ex, ey+bob-2, 4*s, 20*s);
+        ctx.fillStyle='#3a3a44';
+        ctx.fillRect(ex+2, ey+bob+2, 12*s, 3*s); // rivet band
+        ctx.fillStyle='#8a8a99';
+        ctx.beginPath(); ctx.arc(ex+4,ey+bob+3,1*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+12,ey+bob+3,1*s,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#444450';
+        ctx.fillRect(ex+3, ey+bob-6, 10*s, 6*s); // head block
+        ctx.fillStyle='#ff8822';
+        ctx.globalAlpha=0.7+Math.sin(animFrame*0.1)*0.3;
+        ctx.fillRect(ex+5, ey+bob-4, 2*s, 2*s);
+        ctx.fillRect(ex+9, ey+bob-4, 2*s, 2*s);
+        ctx.globalAlpha=1;
+        ctx.fillStyle=frozen?'#88ccff':'#5a5a66';
+        ctx.fillRect(ex+2, ey+bob+18, 4*s, 5*s);
+        ctx.fillRect(ex+10, ey+bob+18, 4*s, 5*s);
+    } else if(e.type==='bombbeetle'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#1a1a1a';
+        ctx.fillRect(ex, ey+bob+2, 18*s, 12*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#333333';
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+8, 9*s, 6*s, 0, 0, Math.PI*2); ctx.fill(); // shell
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob+5, 4*s, 2.5*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle='#111';
+        ctx.lineWidth=Math.max(1,s*0.6);
+        ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+2); ctx.lineTo(ex+9,ey+bob+14); ctx.stroke(); // shell seam
+        ctx.fillStyle='#ff6600';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.25)*0.4;
+        ctx.beginPath(); ctx.arc(ex+9,ey+bob+8,2.5*s,0,Math.PI*2); ctx.fill(); // glowing fuse core
+        ctx.globalAlpha=1;
+        ctx.strokeStyle='#ffaa00';
+        ctx.lineWidth=Math.max(1,s*0.5);
+        ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+2); ctx.quadraticCurveTo(ex+12,ey+bob-2,ex+10,ey+bob-5); ctx.stroke(); // lit fuse
+        ctx.fillStyle=frozen?'#88ccff':'#1a1a1a';
+        for(let i=0;i<3;i++){ ctx.fillRect(ex+2+i*6, ey+bob+12, 2*s, 4*s); ctx.fillRect(ex+2+i*6, ey+bob-1, 2*s, 3*s); }
+    } else if(e.type==='golemsentinel'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#1a2530';
+        ctx.fillRect(ex-1, ey+bob-4, 18*s, 24*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#3a5566';
+        ctx.fillRect(ex, ey+bob-3, 16*s, 22*s);
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(ex, ey+bob-3, 4*s, 22*s);
+        ctx.fillStyle='#223344';
+        ctx.fillRect(ex+2, ey+bob-8, 12*s, 6*s); // head
+        ctx.fillStyle='#aaffff';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.3)*0.4;
+        ctx.fillRect(ex+4, ey+bob-6, 2*s, 2*s);
+        ctx.fillRect(ex+10, ey+bob-6, 2*s, 2*s);
+        ctx.globalAlpha=1;
+        ctx.strokeStyle='#66ddff';
+        ctx.lineWidth=Math.max(1,s*0.6);
+        for(let i=0;i<2;i++){ ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+2+i*8); ctx.lineTo(ex+14,ey+bob+2+i*8); ctx.stroke(); } // conduit lines
+        ctx.fillStyle=frozen?'#88ccff':'#1a2530';
+        ctx.fillRect(ex+2, ey+bob+17, 4*s, 5*s);
+        ctx.fillRect(ex+10, ey+bob+17, 4*s, 5*s);
+    } else if(e.type==='rottedrevenant'){
+        ctx.fillStyle=frozen?'#6bb0e0':'#2a3a1a';
+        ctx.fillRect(ex+1, ey+bob-1, 10*s, 16*s); // outline
+        ctx.fillStyle=frozen?'#88ccff':'#4a5a2a';
+        ctx.fillRect(ex+2, ey+bob, 8*s, 14*s);
+        ctx.fillStyle='#6a7a3a';
+        ctx.fillRect(ex+3, ey+bob-6, 6*s, 7*s); // rotted head
+        ctx.fillStyle='#1a1a0a';
+        ctx.fillRect(ex+4, ey+bob-3, 2*s, 3*s); // exposed decay patch
+        ctx.fillStyle='#aaff44';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.15)*0.3;
+        ctx.fillRect(ex+4, ey+bob-4, 1.3*s, 1.3*s);
+        ctx.fillRect(ex+7, ey+bob-4, 1.3*s, 1.3*s);
+        ctx.globalAlpha=1;
+        ctx.fillStyle='#3a4a1a';
+        for(let i=0;i<2;i++) ctx.fillRect(ex+2+i*5, ey+bob+3, 1.5*s, 8*s); // tattered rot streaks
+        ctx.fillStyle=frozen?'#88ccff':'#2a3a1a';
+        ctx.fillRect(ex+2, ey+bob+13, 3*s, 4*s);
+        ctx.fillRect(ex+6, ey+bob+13, 3*s, 4*s);
     } else if(e.type==='boss'){
         drawBossSprite(e, ex, ey, s, bob, frozen);
     }
 
-    // HP bar
+    if(e.poisonTicks>0){
+        ctx.fillStyle='rgba(120,200,60,0.6)';
+        for(let i=0;i<3;i++){
+            let bx=ex+3+i*4, by=ey+bob-2-((animFrame*0.7+i*7)%14);
+            ctx.beginPath(); ctx.arc(bx, by, 1.5*s, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
+    // HP bar — shown once an enemy has taken any damage
     if(e.hp<e.maxHp){
         let barW = e.type==='boss' ? 26 : 16;
         let barY = e.type==='boss' ? -34 : -14;
+        let barX = ex - (e.type==='boss'?5:0);
+        let barPx = ey + barY;
+        let pct = Math.max(0, e.hp/e.maxHp);
+        let fillColor = e.type==='boss' ? '#ff4444' : (pct>0.6 ? '#44cc44' : pct>0.3 ? '#ddcc22' : '#ee4433');
         ctx.fillStyle='#111';
-        ctx.fillRect(ex-(e.type==='boss'?5:0), (ey+barY)*s, barW*s, 3*s);
-        ctx.fillStyle=e.type==='boss'?'#ff4444':'#44cc44';
-        ctx.fillRect(ex-(e.type==='boss'?5:0), (ey+barY)*s, barW*s*(e.hp/e.maxHp), 3*s);
+        ctx.fillRect(barX, barPx, barW*s, 3*s);
+        ctx.fillStyle=fillColor;
+        ctx.fillRect(barX, barPx, barW*s*pct, 3*s);
+        ctx.strokeStyle='rgba(0,0,0,0.6)';
+        ctx.lineWidth=1;
+        ctx.strokeRect(barX, barPx, barW*s, 3*s);
         if(e.type==='boss' && e.bossDef){
             ctx.font=`${8*s}px monospace`;
             ctx.fillStyle='#ffcc44';
             ctx.textAlign='center';
-            ctx.fillText(e.bossDef.name, ex+8*s-(5*s), (ey+barY-3)*s);
+            ctx.fillText(e.bossDef.name, ex+8-5, barPx-3);
             ctx.textAlign='left';
         }
     }
@@ -956,21 +1921,12 @@ function drawBossSprite(e, ex, ey, s, bob, frozen){
     let eye = def.eye;
     let pulse = Math.sin(animFrame*0.1)*0.5+0.5;
 
-    // Permanent ground glow in the boss's trim color — keeps every boss readable
-    // against the dark background regardless of how dark its body palette is.
-    ctx.globalAlpha = 0.22+pulse*0.1;
-    ctx.fillStyle = trim;
-    ctx.beginPath();
-    ctx.ellipse((ex+9)*s, (ey+bob+31)*s, 15*s, 5*s, 0, 0, Math.PI*2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-
     // Shield aura
     if(e.shieldActive){
         ctx.globalAlpha = 0.35+pulse*0.2;
         ctx.fillStyle = '#aaeeff';
         ctx.beginPath();
-        ctx.arc(ex+11*s, (ey+bob+4)*s, 22*s, 0, Math.PI*2);
+        ctx.arc(ex+11, (ey+bob+4), 22*s, 0, Math.PI*2);
         ctx.fill();
         ctx.globalAlpha = 1;
     }
@@ -979,54 +1935,54 @@ function drawBossSprite(e, ex, ey, s, bob, frozen){
         ctx.globalAlpha = 0.3+pulse*0.3;
         ctx.fillStyle = '#ff3300';
         ctx.beginPath();
-        ctx.arc(ex+11*s, (ey+bob+4)*s, 18*s, 0, Math.PI*2);
+        ctx.arc(ex+11, (ey+bob+4), 18*s, 0, Math.PI*2);
         ctx.fill();
         ctx.globalAlpha = 1;
     }
 
     // Legs
     ctx.fillStyle = robe;
-    ctx.fillRect((ex+2)*s, (ey+bob+22)*s, 6*s, 9*s);
-    ctx.fillRect((ex+12)*s, (ey+bob+22)*s, 6*s, 9*s);
+    ctx.fillRect((ex+2), (ey+bob+22), 6*s, 9*s);
+    ctx.fillRect((ex+12), (ey+bob+22), 6*s, 9*s);
     ctx.fillStyle = '#111';
-    ctx.fillRect((ex+2)*s, (ey+bob+29)*s, 6*s, 3*s);
-    ctx.fillRect((ex+12)*s, (ey+bob+29)*s, 6*s, 3*s);
+    ctx.fillRect((ex+2), (ey+bob+29), 6*s, 3*s);
+    ctx.fillRect((ex+12), (ey+bob+29), 6*s, 3*s);
 
     // Torso (layered shading for extra detail/resolution)
     ctx.fillStyle = robe;
-    ctx.fillRect(ex*s, (ey+bob-2)*s, 20*s, 26*s);
+    ctx.fillRect(ex, (ey+bob-2), 20*s, 26*s);
     ctx.fillStyle = body;
-    ctx.fillRect((ex+2)*s, (ey+bob)*s, 16*s, 20*s);
+    ctx.fillRect((ex+2), (ey+bob), 16*s, 20*s);
     ctx.fillStyle = trim;
-    ctx.fillRect((ex+2)*s, (ey+bob+9)*s, 16*s, 3*s); // belt
+    ctx.fillRect((ex+2), (ey+bob+9), 16*s, 3*s); // belt
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
-    ctx.fillRect((ex+3)*s, (ey+bob+1)*s, 5*s, 16*s); // highlight
+    ctx.fillRect((ex+3), (ey+bob+1), 5*s, 16*s); // highlight
 
     // Arms
     ctx.fillStyle = robe;
-    ctx.fillRect((ex-4)*s, (ey+bob+2)*s, 5*s, 16*s);
-    ctx.fillRect((ex+19)*s, (ey+bob+2)*s, 5*s, 16*s);
+    ctx.fillRect((ex-4), (ey+bob+2), 5*s, 16*s);
+    ctx.fillRect((ex+19), (ey+bob+2), 5*s, 16*s);
     ctx.fillStyle = trim;
-    ctx.fillRect((ex-4)*s, (ey+bob+15)*s, 5*s, 4*s);
-    ctx.fillRect((ex+19)*s, (ey+bob+15)*s, 5*s, 4*s);
+    ctx.fillRect((ex-4), (ey+bob+15), 5*s, 4*s);
+    ctx.fillRect((ex+19), (ey+bob+15), 5*s, 4*s);
 
     // Head
     ctx.fillStyle = body;
-    ctx.fillRect((ex+4)*s, (ey+bob-14)*s, 12*s, 13*s);
+    ctx.fillRect((ex+4), (ey+bob-14), 12*s, 13*s);
     ctx.fillStyle = robe;
-    ctx.fillRect((ex+3)*s, (ey+bob-16)*s, 14*s, 5*s); // brow/helmet band
+    ctx.fillRect((ex+3), (ey+bob-16), 14*s, 5*s); // brow/helmet band
     // Glowing eyes
     ctx.fillStyle = eye;
     ctx.globalAlpha = 0.6+pulse*0.4;
-    ctx.fillRect((ex+6)*s, (ey+bob-9)*s, 3*s, 3*s);
-    ctx.fillRect((ex+11)*s, (ey+bob-9)*s, 3*s, 3*s);
+    ctx.fillRect((ex+6), (ey+bob-9), 3*s, 3*s);
+    ctx.fillRect((ex+11), (ey+bob-9), 3*s, 3*s);
     ctx.globalAlpha = 1;
 
     // Contrast outline around the whole silhouette — makes dark-palette bosses
     // (e.g. Demon Overlord, Necromancer) pop against the dark background.
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.lineWidth = Math.max(1, s*0.6);
-    ctx.strokeRect((ex-4)*s, (ey+bob-16)*s, 28*s, 47*s);
+    ctx.strokeRect((ex-4), (ey+bob-16), 28*s, 47*s);
 
     drawBossAccessory(def, e, ex, ey, s, bob, pulse);
 }
@@ -1037,119 +1993,119 @@ function drawBossAccessory(def, e, ex, ey, s, bob, pulse){
         let flap = Math.sin(animFrame*0.1)*4;
         ctx.fillStyle = def.robe;
         ctx.beginPath();
-        ctx.moveTo((ex+1)*s,(ey+bob+2)*s);
-        ctx.lineTo((ex-16)*s,(ey+bob-8-flap)*s);
-        ctx.lineTo((ex-10)*s,(ey+bob+10)*s);
+        ctx.moveTo((ex+1),(ey+bob+2));
+        ctx.lineTo((ex-16),(ey+bob-8-flap));
+        ctx.lineTo((ex-10),(ey+bob+10));
         ctx.fill();
         ctx.beginPath();
-        ctx.moveTo((ex+19)*s,(ey+bob+2)*s);
-        ctx.lineTo((ex+36)*s,(ey+bob-8+flap)*s);
-        ctx.lineTo((ex+30)*s,(ey+bob+10)*s);
+        ctx.moveTo((ex+19),(ey+bob+2));
+        ctx.lineTo((ex+36),(ey+bob-8+flap));
+        ctx.lineTo((ex+30),(ey+bob+10));
         ctx.fill();
     } else if(acc==='staff_skull'){
         ctx.fillStyle='#444455';
-        ctx.fillRect((ex+21)*s,(ey+bob-20)*s, 2*s, 40*s);
+        ctx.fillRect((ex+21),(ey+bob-20), 2*s, 40*s);
         ctx.fillStyle=def.eye;
         ctx.globalAlpha=0.5+pulse*0.5;
-        ctx.fillRect((ex+18)*s,(ey+bob-26)*s, 8*s, 7*s);
+        ctx.fillRect((ex+18),(ey+bob-26), 8*s, 7*s);
         ctx.globalAlpha=1;
         ctx.fillStyle='#000';
-        ctx.fillRect((ex+20)*s,(ey+bob-24)*s, 1.5*s, 2*s);
-        ctx.fillRect((ex+23)*s,(ey+bob-24)*s, 1.5*s, 2*s);
+        ctx.fillRect((ex+20),(ey+bob-24), 1.5*s, 2*s);
+        ctx.fillRect((ex+23),(ey+bob-24), 1.5*s, 2*s);
     } else if(acc==='staff_orb'){
         ctx.fillStyle='#334477';
-        ctx.fillRect((ex+21)*s,(ey+bob-18)*s, 2*s, 38*s);
+        ctx.fillRect((ex+21),(ey+bob-18), 2*s, 38*s);
         ctx.fillStyle=def.eye;
         ctx.globalAlpha=0.5+pulse*0.5;
-        ctx.beginPath(); ctx.arc((ex+22)*s,(ey+bob-22)*s, 5*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc((ex+22),(ey+bob-22), 5*s, 0, Math.PI*2); ctx.fill();
         ctx.globalAlpha=1;
     } else if(acc==='shoulderspikes'){
         ctx.fillStyle='#777';
         for(let i=0;i<3;i++){
             ctx.beginPath();
-            ctx.moveTo((ex-2+i*3)*s,(ey+bob-2)*s);
-            ctx.lineTo((ex-1+i*3)*s,(ey+bob-9)*s);
-            ctx.lineTo((ex+i*3)*s,(ey+bob-2)*s);
+            ctx.moveTo((ex-2+i*3),(ey+bob-2));
+            ctx.lineTo((ex-1+i*3),(ey+bob-9));
+            ctx.lineTo((ex+i*3),(ey+bob-2));
             ctx.fill();
         }
         for(let i=0;i<3;i++){
             ctx.beginPath();
-            ctx.moveTo((ex+16+i*3)*s,(ey+bob-2)*s);
-            ctx.lineTo((ex+17+i*3)*s,(ey+bob-9)*s);
-            ctx.lineTo((ex+18+i*3)*s,(ey+bob-2)*s);
+            ctx.moveTo((ex+16+i*3),(ey+bob-2));
+            ctx.lineTo((ex+17+i*3),(ey+bob-9));
+            ctx.lineTo((ex+18+i*3),(ey+bob-2));
             ctx.fill();
         }
     } else if(acc==='hood'){
         ctx.fillStyle=def.robe;
-        ctx.fillRect((ex+2)*s,(ey+bob-17)*s, 16*s, 6*s);
+        ctx.fillRect((ex+2),(ey+bob-17), 16*s, 6*s);
         ctx.beginPath();
-        ctx.moveTo((ex+4)*s,(ey+bob-17)*s);
-        ctx.lineTo((ex+10)*s,(ey+bob-25)*s);
-        ctx.lineTo((ex+16)*s,(ey+bob-17)*s);
+        ctx.moveTo((ex+4),(ey+bob-17));
+        ctx.lineTo((ex+10),(ey+bob-25));
+        ctx.lineTo((ex+16),(ey+bob-17));
         ctx.fill();
         if(animFrame%40<20){
             ctx.globalAlpha=0.28;
             ctx.fillStyle='#000';
-            ctx.fillRect((ex-4)*s,(ey+bob+2)*s, 28*s, 20*s);
+            ctx.fillRect((ex-4),(ey+bob+2), 28*s, 20*s);
             ctx.globalAlpha=1;
         }
     } else if(acc==='moss'){
         ctx.fillStyle='#5a7a3a';
-        ctx.fillRect((ex+1)*s,(ey+bob+2)*s, 5*s, 4*s);
-        ctx.fillRect((ex+13)*s,(ey+bob+10)*s, 6*s, 4*s);
+        ctx.fillRect((ex+1),(ey+bob+2), 5*s, 4*s);
+        ctx.fillRect((ex+13),(ey+bob+10), 6*s, 4*s);
         ctx.fillStyle='#333';
-        ctx.fillRect((ex+4)*s,(ey+bob-4)*s, 1.5*s, 8*s);
-        ctx.fillRect((ex+12)*s,(ey+bob+4)*s, 1.5*s, 10*s);
+        ctx.fillRect((ex+4),(ey+bob-4), 1.5*s, 8*s);
+        ctx.fillRect((ex+12),(ey+bob+4), 1.5*s, 10*s);
     } else if(acc==='cape'){
         let sway = Math.sin(animFrame*0.08)*3;
         ctx.fillStyle=def.trim;
         ctx.beginPath();
-        ctx.moveTo((ex+1)*s,(ey+bob-1)*s);
-        ctx.lineTo((ex-8+sway)*s,(ey+bob+28)*s);
-        ctx.lineTo((ex+19)*s,(ey+bob+24)*s);
-        ctx.lineTo((ex+19)*s,(ey+bob-1)*s);
+        ctx.moveTo((ex+1),(ey+bob-1));
+        ctx.lineTo((ex-8+sway),(ey+bob+28));
+        ctx.lineTo((ex+19),(ey+bob+24));
+        ctx.lineTo((ex+19),(ey+bob-1));
         ctx.fill();
         ctx.fillStyle=def.eye;
-        ctx.fillRect((ex+7)*s,(ey+bob-5)*s, 6*s, 2*s); // fangs hint
+        ctx.fillRect((ex+7),(ey+bob-5), 6*s, 2*s); // fangs hint
     } else if(acc==='crown'){
         ctx.fillStyle='#ffcc00';
-        ctx.fillRect((ex+3)*s,(ey+bob-21)*s, 14*s, 5*s);
+        ctx.fillRect((ex+3),(ey+bob-21), 14*s, 5*s);
         for(let i=0;i<4;i++){
             ctx.beginPath();
-            ctx.moveTo((ex+3+i*3.5)*s,(ey+bob-21)*s);
-            ctx.lineTo((ex+4.75+i*3.5)*s,(ey+bob-27)*s);
-            ctx.lineTo((ex+6.5+i*3.5)*s,(ey+bob-21)*s);
+            ctx.moveTo((ex+3+i*3.5),(ey+bob-21));
+            ctx.lineTo((ex+4.75+i*3.5),(ey+bob-27));
+            ctx.lineTo((ex+6.5+i*3.5),(ey+bob-21));
             ctx.fill();
         }
     } else if(acc==='icecrown'){
         ctx.fillStyle='#cceeff';
         for(let i=0;i<3;i++){
             ctx.beginPath();
-            ctx.moveTo((ex+4+i*5)*s,(ey+bob-16)*s);
-            ctx.lineTo((ex+6.5+i*5)*s,(ey+bob-26)*s);
-            ctx.lineTo((ex+9+i*5)*s,(ey+bob-16)*s);
+            ctx.moveTo((ex+4+i*5),(ey+bob-16));
+            ctx.lineTo((ex+6.5+i*5),(ey+bob-26));
+            ctx.lineTo((ex+9+i*5),(ey+bob-16));
             ctx.fill();
         }
         if(animFrame%20<10){
             ctx.fillStyle='rgba(200,240,255,0.5)';
-            ctx.fillRect((ex-2)*s,(ey+bob-30)*s, 24*s, 40*s);
+            ctx.fillRect((ex-2),(ey+bob-30), 24*s, 40*s);
         }
     } else if(acc==='horns'){
         ctx.fillStyle='#221111';
         ctx.beginPath();
-        ctx.moveTo((ex+3)*s,(ey+bob-14)*s);
-        ctx.lineTo((ex-2)*s,(ey+bob-24)*s);
-        ctx.lineTo((ex+6)*s,(ey+bob-13)*s);
+        ctx.moveTo((ex+3),(ey+bob-14));
+        ctx.lineTo((ex-2),(ey+bob-24));
+        ctx.lineTo((ex+6),(ey+bob-13));
         ctx.fill();
         ctx.beginPath();
-        ctx.moveTo((ex+17)*s,(ey+bob-14)*s);
-        ctx.lineTo((ex+22)*s,(ey+bob-24)*s);
-        ctx.lineTo((ex+14)*s,(ey+bob-13)*s);
+        ctx.moveTo((ex+17),(ey+bob-14));
+        ctx.lineTo((ex+22),(ey+bob-24));
+        ctx.lineTo((ex+14),(ey+bob-13));
         ctx.fill();
         if(e.enraged){
             ctx.globalAlpha=0.4+pulse*0.4;
             ctx.fillStyle='#ff4400';
-            ctx.fillRect((ex-6)*s,(ey+bob-6)*s, 32*s, 30*s);
+            ctx.fillRect((ex-6),(ey+bob-6), 32*s, 30*s);
             ctx.globalAlpha=1;
         }
     }
@@ -1177,6 +2133,52 @@ function drawProjectile(p, ox, oy, s){
         ctx.fillRect(px2,py2, 7*s, 7*s);
         ctx.fillStyle='#444';
         ctx.fillRect(px2+1*s,py2+1*s, 5*s, 5*s);
+    } else if(p.type==='bolt'){
+        ctx.fillStyle='#334455';
+        ctx.fillRect(px2,py2, 10*s, 2*s);
+        ctx.fillStyle='#ccddee';
+        ctx.fillRect(px2+8*s,py2-1*s, 3*s, 4*s);
+        if(p.arc){ // shadow beneath, grows fainter with height
+            ctx.globalAlpha = Math.max(0.1, 0.4-(p.groundHeight||0)*0.01);
+            ctx.fillStyle='#000';
+            ctx.beginPath(); ctx.ellipse(px2+5*s, (oy+p.ty)*s, 5*s, 2*s, 0, 0, Math.PI*2); ctx.fill();
+            ctx.globalAlpha=1;
+        }
+    } else if(p.type==='axe'){
+        ctx.save();
+        ctx.translate(px2+3*s, py2+3*s);
+        ctx.rotate((animFrame*0.6)%(Math.PI*2));
+        ctx.fillStyle='#888888';
+        ctx.fillRect(-1*s,-6*s, 2*s, 12*s);
+        ctx.fillStyle='#bbbbbb';
+        ctx.beginPath();
+        ctx.moveTo(1*s,-5*s); ctx.lineTo(6*s,-2*s); ctx.lineTo(1*s,1*s); ctx.fill();
+        ctx.restore();
+        if(p.arc){
+            ctx.globalAlpha = Math.max(0.1, 0.4-(p.groundHeight||0)*0.01);
+            ctx.fillStyle='#000';
+            ctx.beginPath(); ctx.ellipse(px2+3*s, (oy+p.ty)*s, 4*s, 2*s, 0, 0, Math.PI*2); ctx.fill();
+            ctx.globalAlpha=1;
+        }
+    } else if(p.type==='poison'){
+        ctx.save();
+        ctx.translate(px2+3*s, py2+3*s);
+        ctx.rotate((animFrame*0.3)%(Math.PI*2));
+        ctx.fillStyle='#77aa22';
+        ctx.fillRect(-2*s,-3*s, 4*s, 6*s);
+        ctx.fillStyle='#aaccaa';
+        ctx.fillRect(-1*s,-5*s, 2*s, 2*s); // cork
+        ctx.restore();
+        ctx.globalAlpha=0.5;
+        ctx.fillStyle='#99cc44';
+        ctx.beginPath(); ctx.arc(px2+3*s,py2+3*s, 5*s, 0, Math.PI*2); ctx.fill(); // toxic haze trail
+        ctx.globalAlpha=1;
+        if(p.arc){
+            ctx.globalAlpha = Math.max(0.1, 0.4-(p.groundHeight||0)*0.01);
+            ctx.fillStyle='#334422';
+            ctx.beginPath(); ctx.ellipse(px2+3*s, (oy+p.ty)*s, 5*s, 2*s, 0, 0, Math.PI*2); ctx.fill();
+            ctx.globalAlpha=1;
+        }
     } else {
         ctx.fillStyle='#fff';
         ctx.fillRect(px2,py2, 4*s, 4*s);
@@ -1188,27 +2190,74 @@ function towerUpdate(t){
     t.cooldown--;
     if(t.cooldown>0) return;
     let rate = Math.floor(t.rate / globalSpeedMult);
+    if(activeWeather==='blizzard') rate = Math.floor(rate*1.5); // fires 50% slower
     // Percentage-based range: tower covers from 0% to rangePercent of the stage width (left side)
     let rangePercent = (t.rangePercent !== undefined) ? t.rangePercent : 50;
+    if(activeWeather==='fog') rangePercent *= 0.5;
     let maxEnemyX = (rangePercent * GAME_W / 100);
-    let nearest=null, dist=Infinity;
+    let target=null, best=Infinity;
     enemies.forEach(e=>{
         if(e.dead) return;
         // Check if enemy is in tower's range zone (percentage-based only)
         if(e.x > maxEnemyX) return;
-        let d=Math.hypot(e.x-t.x, e.y-t.y);
-        if(d<dist){ dist=d; nearest=e; }
+        if(towerTargetMode==='strongest'){
+            let score = -e.maxHp; // most-max-HP wins; lower score = better
+            if(score<best){ best=score; target=e; }
+        } else {
+            let d=Math.hypot(e.x-t.x, e.y-t.y);
+            if(d<best){ best=d; target=e; }
+        }
     });
-    if(!nearest) return;
+    if(!target) return;
     t.cooldown=rate;
-    let angle=Math.atan2(nearest.y-t.y, nearest.x-t.x);
+    let dist=Math.hypot(target.x-t.x, target.y-t.y);
+    let angle=Math.atan2(target.y-t.y, target.x-t.x);
     let spd=3;
     let ptype='arrow';
     if(t.id==='firemage') ptype='fire';
     if(t.id==='icemage') ptype='ice';
     if(t.id==='cannon') ptype='cannon';
-    let dmg=t.dmg*globalDmgMult*(t.level>1?1+t.level*0.3:1);
-    projectiles.push({x:t.x+10,y:t.y,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life:60,freeze:t.freeze,splash:t.splash,pierce:t.pierce});
+    if(t.id==='ballista') ptype='bolt';
+    if(t.id==='axeman') ptype='axe';
+    if(t.id==='poison') ptype='poison';
+    let dmg=t.dmg*globalDmgMult*waveDmgMult*(t.level>1?1+t.level*0.3:1);
+    if(activeWeather==='rain' && t.id==='firemage') dmg *= 0.5; // fire towers weaker in the rain
+    let sx=t.x+10, sy=t.y;
+
+    if(t.id==='lightning'){
+        // Instant chain strike: no projectile travel time at all — the bolt
+        // jumps between nearby enemies immediately, each jump for less damage.
+        let hitList=[];
+        let current=target;
+        let usedIds=new Set();
+        for(let i=0;i<t.chainCount && current;i++){
+            let jumpDmg = dmg*Math.pow(t.chainFalloff,i);
+            applyDamageToEnemy(current, jumpDmg, t.id);
+            hitList.push({x:current.x,y:current.y});
+            usedIds.add(current);
+            let next=null, nd=t.chainRadius;
+            enemies.forEach(e2=>{
+                if(e2.dead || usedIds.has(e2)) return;
+                let d=Math.hypot(e2.x-current.x, e2.y-current.y);
+                if(d<nd){ nd=d; next=e2; }
+            });
+            current=next;
+        }
+        lightningBolts.push({points:[{x:sx,y:sy},...hitList], life:10});
+        return;
+    }
+
+    if(t.id==='ballista' || t.id==='axeman' || t.id==='poison'){
+        // Parabolic arc: naturally limits pierce range, since the shot can only
+        // hit enemies near ground level (close to launch or close to landing),
+        // not everything along a straight line the way a flat shot would.
+        let totalLife = Math.max(20, Math.ceil(dist/spd));
+        let arcHeight = Math.min(50, 15+dist*0.15);
+        projectiles.push({sx,sy,tx:target.x,ty:target.y,x:sx,y:sy,life:totalLife,totalLife,arcHeight,arc:true,dmg,type:ptype,freeze:t.freeze,splash:t.splash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+    } else {
+        let life = Math.ceil(dist/spd)+15; // enough frames to actually reach the target, regardless of range
+        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life,freeze:t.freeze,splash:t.splash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+    }
 }
 
 let lastTime=0;
@@ -1228,9 +2277,12 @@ function gameLoop(time){
 
     if(state==='playing'){
         spawnTimer++;
-        if(spawnQueue.length>0 && spawnTimer>30){
-            spawnTimer=0;
-            enemies.push(spawnEnemy(spawnQueue.shift()));
+        let spawnInterval = activeWeather==='night' ? 15 : 30;
+        if(spawnQueue.length>0 && spawnTimer>spawnInterval){
+            if(enemies.filter(e=>!e.dead).length < MAX_ALIVE_ENEMIES){
+                spawnTimer=0;
+                enemies.push(spawnEnemy(spawnQueue.shift()));
+            }
         }
 
         enemies.forEach(e=>{
@@ -1238,20 +2290,43 @@ function gameLoop(time){
             let spd=e.speed;
             if(e.frozen>0){ spd*=0.3; e.frozen--; }
             if(hasMoat && e.x<130) spd*=0.5;
+            if(e.poisonTicks>0){
+                e.poisonTimer++;
+                if(e.poisonTimer>=15){
+                    e.poisonTimer=0;
+                    e.poisonTicks--;
+                    applyDamageToEnemy(e, e.poisonDmgPerTick, e.poisonSource);
+                }
+                if(e.dead) return;
+            }
             e.x-=spd;
             e.frameTimer++;
             if(e.frameTimer>8){e.frameTimer=0;e.frame=(e.frame+1)%4;}
             if(e.x<=100){ 
                 // Incremental contact damage (scaled down)
-                castleHP-=e.dmg*0.005; 
+                castleHP-=e.dmg*0.005*waveContactDmgMult; 
                 if(e.x<=70){ 
                     // Direct impact / explosive break on reach
-                    let fullDmg = 2; // Default goblin / wolf
-                    if(e.type==='skeleton') fullDmg = 4;
-                    if(e.type==='knight') fullDmg = 8;
-                    if(e.type==='siege') fullDmg = 15;
+                    let fullDmg = 20; // goblin
+                    if(e.type==='skeleton') fullDmg = 22;
+                    if(e.type==='knight') fullDmg = 26;
+                    if(e.type==='wolf') fullDmg = 24;
+                    if(e.type==='siege') fullDmg = 35;
                     if(e.type==='boss') fullDmg = 20+(e.dmg||0);
-                    castleHP -= fullDmg;
+                    if(e.type==='wagon') fullDmg = 0;
+                    if(e.type==='goblin_scout') fullDmg = 16;
+                    if(e.type==='goblin_armored') fullDmg = 24;
+                    if(e.type==='shade') fullDmg = 26;
+                    if(e.type==='wolf_dire') fullDmg = 30;
+                    if(e.type==='leshy') fullDmg = 32;
+                    if(e.type==='wisphawk') fullDmg = 18;
+                    if(e.type==='brambletreant') fullDmg = 28;
+                    if(e.type==='embersalamander') fullDmg = 26;
+                    if(e.type==='irongolem') fullDmg = 38;
+                    if(e.type==='bombbeetle') fullDmg = 34;
+                    if(e.type==='golemsentinel') fullDmg = 36;
+                    if(e.type==='rottedrevenant') fullDmg = 30;
+                    castleHP -= fullDmg*waveContactDmgMult;
                     e.dead=true; 
                 } 
             }
@@ -1280,21 +2355,51 @@ function gameLoop(time){
         }
 
         projectiles.forEach(p=>{
-            p.x+=p.vx; p.y+=p.vy; p.life--;
+            if(p.arc){
+                p.life--;
+                let progress = Math.min(1, Math.max(0, 1-(p.life/p.totalLife)));
+                p.x = p.sx + (p.tx-p.sx)*progress;
+                p.y = p.sy + (p.ty-p.sy)*progress - p.arcHeight*4*progress*(1-progress);
+                p.groundHeight = p.arcHeight*4*progress*(1-progress);
+            } else {
+                p.x+=p.vx; p.y+=p.vy; p.life--;
+            }
+            if(p.arc && p.groundHeight>10) return; // mid-flight — too high to hit anything yet
             enemies.forEach(e=>{
                 if(e.dead) return;
+                if(p.hitSet && p.hitSet.has(e)) return;
                 if(Math.abs(p.x-e.x)<14 && Math.abs(p.y-e.y)<18 && p.life>0){
                     if(p.freeze){ e.frozen=60; }
                     else {
-                        let dmgDealt = p.dmg;
-                        if(e.shieldActive) dmgDealt *= (1-e.shieldReduction);
-                        e.hp-=dmgDealt;
+                        applyDamageToEnemy(e, p.dmg, p.sourceTowerId);
+                        if(p.poison && !e.dead){
+                            e.poisonTicks = p.poison.ticks;
+                            e.poisonDmgPerTick = p.poison.dmgPerTick;
+                            e.poisonSource = p.sourceTowerId;
+                            e.poisonTimer = 0;
+                        }
                     }
-                    if(p.splash) enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) e2.hp-=p.dmg*0.5; });
+                    if(p.splash) enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) applyDamageToEnemy(e2, p.dmg*0.5, p.sourceTowerId); });
+                    if(p.hitSet) p.hitSet.add(e);
                     if(!p.pierce) p.life=0;
-                    if(e.hp<=0){ e.dead=true; gold=Math.min(gold+2,maxGold); kills++; }
                 }
             });
+            // Alchemist flask that missed its target entirely still shatters on
+            // landing, splashing poison over the area instead of doing nothing.
+            if(p.type==='poison' && p.arc && p.life<=0 && p.hitSet && p.hitSet.size===0 && p.splash){
+                enemies.forEach(e2=>{
+                    if(!e2.dead && Math.hypot(e2.x-p.tx,e2.y-p.ty)<p.splash){
+                        applyDamageToEnemy(e2, p.dmg, p.sourceTowerId);
+                        if(p.poison && !e2.dead){
+                            e2.poisonTicks = p.poison.ticks;
+                            e2.poisonDmgPerTick = p.poison.dmgPerTick;
+                            e2.poisonSource = p.sourceTowerId;
+                            e2.poisonTimer = 0;
+                        }
+                    }
+                });
+                particles.push({x:p.tx,y:p.ty,vx:0,vy:0,life:15,color:'#77aa22',size:6});
+            }
         });
         projectiles=projectiles.filter(p=>p.life>0);
 
@@ -1306,6 +2411,24 @@ function gameLoop(time){
     // Draw enemies and projectiles on top
     enemies.forEach(e=>drawEnemy(e,ox,oy,s));
     projectiles.forEach(p=>drawProjectile(p,ox,oy,s));
+
+    lightningBolts.forEach(b=>{
+        b.life--;
+        ctx.strokeStyle=`rgba(255,238,68,${Math.min(1,b.life/6)})`;
+        ctx.lineWidth=Math.max(1,2*s);
+        ctx.beginPath();
+        b.points.forEach((pt,i)=>{
+            let jx=(Math.random()-0.5)*4, jy=(Math.random()-0.5)*4;
+            let px=(ox+pt.x+(i>0?jx:0))*s, py=(oy+pt.y+(i>0?jy:0))*s;
+            if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        });
+        ctx.stroke();
+        b.points.forEach(pt=>{
+            ctx.fillStyle='rgba(255,255,200,0.7)';
+            ctx.beginPath(); ctx.arc((ox+pt.x)*s,(oy+pt.y)*s, 3*s, 0, Math.PI*2); ctx.fill();
+        });
+    });
+    lightningBolts=lightningBolts.filter(b=>b.life>0);
 
     particles.forEach(p=>{
         p.x+=(p.vx||0); p.y+=(p.vy||0); p.life--;
