@@ -84,6 +84,222 @@ let towerTargetMode = 'nearest'; // 'nearest' | 'strongest' — cycled via the H
 let lightningBolts = []; // transient visual chain-lightning effects: {points:[{x,y},...], life}
 let ammoPerCorrect = 1;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// THE KINGDOM — persistent meta-progression shop, spent between runs.
+// Crowns carry over across page reloads via localStorage. Effects are
+// intentionally undocumented in the shop UI — players discover them by
+// noticing how their next run feels different, not by reading a tooltip.
+// ═══════════════════════════════════════════════════════════════════════════
+const KINGDOM_SAVE_KEY = 'castleDefenceKingdomSave_v1';
+function loadKingdomSave(){
+    try {
+        let raw = localStorage.getItem(KINGDOM_SAVE_KEY);
+        if(raw){
+            let parsed = JSON.parse(raw);
+            if(parsed && typeof parsed==='object') return {
+                crowns: parsed.crowns||0,
+                levels: parsed.levels||{},
+                totalCorrectAnswers: parsed.totalCorrectAnswers||0,
+                equippedPowerups: parsed.equippedPowerups||[],
+                notifiedThresholds: parsed.notifiedThresholds||[],
+            };
+        }
+    } catch(err){ console.warn('Kingdom save unavailable (localStorage blocked) — progress will not persist this session.', err); }
+    return { crowns:0, levels:{}, totalCorrectAnswers:0, equippedPowerups:[], notifiedThresholds:[] };
+}
+let kingdomStorageOk = true;
+function saveKingdomSave(){
+    try { localStorage.setItem(KINGDOM_SAVE_KEY, JSON.stringify(kingdomSave)); }
+    catch(err){ kingdomStorageOk = false; console.warn('Could not persist Kingdom save', err); }
+}
+let kingdomSave = loadKingdomSave();
+
+const KINGDOM_UPGRADES = [
+    { id:'soldiers',        category:'Military',  name:'⚔️ Trained Soldiers',   baseCost:20, costMult:1.5,  maxLevel:20 },
+    { id:'archives',        category:'Military',  name:'📜 Scholarly Archives', baseCost:25, costMult:1.5,  maxLevel:20 },
+    { id:'blacksmith',      category:'Military',  name:'🔨 Blacksmith',         baseCost:30, costMult:1.55, maxLevel:20 },
+    { id:'siegeengineers',  category:'Military',  name:'💣 Siege Engineers',    baseCost:25, costMult:1.5,  maxLevel:20 },
+    { id:'traininggrounds', category:'Military',  name:'🏕️ Training Grounds',   baseCost:40, costMult:1,    maxLevel:1  },
+    { id:'treasury',        category:'Economy',   name:'💰 Treasury',           baseCost:35, costMult:1.85, maxLevel:15 },
+    { id:'marketplace',     category:'Economy',   name:'🏪 Marketplace',        baseCost:35, costMult:1.85, maxLevel:10 },
+    { id:'supplydepot',     category:'Economy',   name:'📦 Supply Depot',       baseCost:30, costMult:1.85, maxLevel:9  },
+    { id:'warehouse',       category:'Economy',   name:'🏭 Warehouse',          baseCost:30, costMult:1.85, maxLevel:15 },
+    { id:'walls',           category:'Castle',    name:'🧱 Reinforced Walls',   baseCost:20, costMult:1.45, maxLevel:20 },
+    { id:'healers',         category:'Castle',    name:'✨ Royal Healers',      baseCost:35, costMult:1.5,  maxLevel:20 },
+    { id:'watchtowers',     category:'Castle',    name:'🔭 Watch Towers',       baseCost:40, costMult:1.6,  maxLevel:3  },
+    { id:'studyhall',       category:'Education', name:'🎓 Study Hall',         baseCost:25, costMult:1.5,  maxLevel:15 },
+    { id:'apprenticeships', category:'Education', name:'🛠️ Apprenticeships',    baseCost:30, costMult:1.5,  maxLevel:15 },
+    { id:'library',         category:'Education', name:'📚 Library',            baseCost:30, costMult:1.5,  maxLevel:15 },
+    { id:'academy',         category:'Education', name:'🏛️ Academy',            baseCost:35, costMult:1.55, maxLevel:10 },
+];
+
+function kingdomLevel(id){ return kingdomSave.levels[id]||0; }
+
+function kingdomUpgradeCost(upg){
+    let level = kingdomLevel(upg.id);
+    let raw = upg.baseCost * Math.pow(upg.costMult, level);
+    let marketLevel = kingdomLevel('marketplace');
+    let discount = Math.max(0.5, 1 - 0.05*marketLevel); // discount caps at 50% off
+    return Math.max(1, Math.round(raw*discount));
+}
+
+function buyKingdomUpgrade(id){
+    let upg = KINGDOM_UPGRADES.find(u=>u.id===id);
+    if(!upg) return false;
+    let level = kingdomLevel(id);
+    if(level>=upg.maxLevel) return false;
+    let cost = kingdomUpgradeCost(upg);
+    if(kingdomSave.crowns<cost) return false;
+    kingdomSave.crowns -= cost;
+    kingdomSave.levels[id] = level+1;
+    saveKingdomSave();
+    return true;
+}
+
+// Reads all Kingdom levels into the runtime bonus variables used throughout
+// the game, and applies the one-time start-of-run effects (starting HP/ammo/
+// tower). Called once when a run begins.
+let kingdomDmgBonusArcherAxe = 0, kingdomEffectDurationMult = 1, kingdomRateMult = 1, kingdomSplashBonusMult = 1;
+let kingdomGoldMult = 1, kingdomHealAfterBossPct = 0, kingdomWatchTowerLevel = 0;
+let kingdomStudyHallLevel = 0, kingdomApprenticeshipLevel = 0, kingdomLibraryLevel = 0, kingdomAcademyLevel = 0;
+let totalBetweenWaveCorrect = 0;
+let lastWaveWasBoss = false;
+let pendingMerchantRoll = null; // Watch Tower lvl2 pre-roll, consumed by the next startBetweenWave
+let weatherPreRolledForNextWave = false; // Watch Tower lvl3 pre-roll, consumed by the next startWave
+
+function applyKingdomStartBonuses(){
+    kingdomDmgBonusArcherAxe = kingdomLevel('soldiers');
+    kingdomEffectDurationMult = 1 + 0.1*kingdomLevel('archives');
+    kingdomRateMult = Math.pow(0.99, kingdomLevel('blacksmith'));
+    kingdomSplashBonusMult = 1 + 0.05*kingdomLevel('siegeengineers');
+    kingdomGoldMult = 1 + 0.1*kingdomLevel('treasury');
+    kingdomHealAfterBossPct = 0.01*kingdomLevel('healers');
+    kingdomWatchTowerLevel = kingdomLevel('watchtowers');
+    kingdomStudyHallLevel = kingdomLevel('studyhall');
+    kingdomApprenticeshipLevel = kingdomLevel('apprenticeships');
+    kingdomLibraryLevel = kingdomLevel('library');
+    kingdomAcademyLevel = kingdomLevel('academy');
+    totalBetweenWaveCorrect = 0;
+
+    maxHP = 100 + kingdomLevel('walls')*5;
+    castleHP = maxHP;
+    maxAmmo = 10 + kingdomLevel('warehouse');
+    ammo = 3 + kingdomLevel('supplydepot');
+
+    if(kingdomLevel('traininggrounds')>=1){
+        let archerCard = allCards.find(c=>c.id==='archer');
+        if(archerCard) applyCard(archerCard);
+    }
+}
+
+// Adds gold respecting the Treasury bonus, this run's Golden Touch bonus (if
+// equipped), and the gold cap — the single path every gold reward goes through.
+function addGold(amount){
+    gold = Math.min(gold + Math.round(amount*kingdomGoldMult*(1+(runPowerupBonuses.goldentouch||0))), maxGold);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SINGLE-RUN POWERUPS — unlocked permanently via lifetime correct answers
+// (across every run), but their *strength* is re-calibrated fresh each run by
+// a shared 4-question quiz answered before that run starts. More correct, and
+// answering faster, makes the equipped powerups stronger for that run only.
+// ═══════════════════════════════════════════════════════════════════════════
+const RUN_POWERUPS = [
+    { id:'luckycharm',     name:'🍀 Lucky Charm',       unlockAt:40  },
+    { id:'stageclear',     name:'🏆 Stage Clear Bonus', unlockAt:80  },
+    { id:'increasedammo',  name:'🏹 Increased Ammo',    unlockAt:120 },
+    { id:'goldentouch',    name:'✨ Golden Touch',       unlockAt:160 },
+];
+const POWERUP_SLOT_TIERS = [ {min:400,slots:4}, {min:300,slots:3}, {min:200,slots:2}, {min:0,slots:1} ];
+function kingdomPowerupSlots(){
+    let c = kingdomSave.totalCorrectAnswers;
+    return POWERUP_SLOT_TIERS.find(t=>c>=t.min).slots;
+}
+
+let pendingUnlockNotifications = [];
+function checkKingdomUnlockNotifications(){
+    let c = kingdomSave.totalCorrectAnswers;
+    let thresholds = [
+        ...RUN_POWERUPS.map(p=>({val:p.unlockAt, label:`${p.name} unlocked!`})),
+        {val:200, label:'You can now equip 2 powerups at once!'},
+        {val:300, label:'You can now equip 3 powerups at once!'},
+        {val:400, label:'You can now equip 4 powerups at once!'},
+    ];
+    thresholds.forEach(t=>{
+        if(c>=t.val && !kingdomSave.notifiedThresholds.includes(t.val)){
+            kingdomSave.notifiedThresholds.push(t.val);
+            pendingUnlockNotifications.push(t.label);
+        }
+    });
+}
+
+// Every correct answer anywhere in the game (ammo questions, between-wave
+// questions, and the pre-run calibration quiz) counts toward lifetime totals.
+function recordCorrectAnswer(){
+    kingdomSave.totalCorrectAnswers++;
+    checkKingdomUnlockNotifications();
+    saveKingdomSave();
+}
+
+function toggleEquipPowerup(id){
+    let idx = kingdomSave.equippedPowerups.indexOf(id);
+    if(idx>=0){ kingdomSave.equippedPowerups.splice(idx,1); }
+    else {
+        if(kingdomSave.equippedPowerups.length>=kingdomPowerupSlots()) return false;
+        kingdomSave.equippedPowerups.push(id);
+    }
+    saveKingdomSave();
+    return true;
+}
+
+let runPowerupBonuses = { luckycharm:0, stageclear:0, increasedammo:0, goldentouch:0 };
+let prerunQuizCorrect = 0, prerunQuizTimes = [];
+
+function computeRunPowerupBonuses(){
+    runPowerupBonuses = { luckycharm:0, stageclear:0, increasedammo:0, goldentouch:0 };
+    let correct = prerunQuizCorrect;
+    let avgTime = prerunQuizTimes.length ? prerunQuizTimes.reduce((a,b)=>a+b,0)/prerunQuizTimes.length : 10;
+    // Speed multiplier: ~3s average or faster is fastest (1.5x), 10s+ average is slowest (0.7x)
+    let speedMult = 1.5 - Math.min(1, Math.max(0, (avgTime-3)/7))*0.8;
+    kingdomSave.equippedPowerups.forEach(id=>{
+        if(id==='luckycharm') runPowerupBonuses.luckycharm = Math.min(0.3, correct*0.05*speedMult);
+        if(id==='stageclear') runPowerupBonuses.stageclear = correct*5;
+        if(id==='increasedammo') runPowerupBonuses.increasedammo = correct*0.25;
+        if(id==='goldentouch') runPowerupBonuses.goldentouch = correct*0.1;
+    });
+}
+
+// Shared pre-run calibration quiz — only runs if at least one powerup is
+// equipped. Runs before the first wave starts.
+function runPrerunQuiz(onComplete){
+    if(kingdomSave.equippedPowerups.length===0){ computeRunPowerupBonuses(); onComplete(); return; }
+    prerunQuizCorrect = 0; prerunQuizTimes = [];
+    let qIndex = 0;
+    function nextQ(){
+        if(qIndex>=4){ computeRunPowerupBonuses(); onComplete(); return; }
+        let q = randQ();
+        let startTime = performance.now();
+        let shuffled = q.a.map((a,i)=>({text:a,correct:i===q.c})).sort(()=>Math.random()-0.5);
+        let html = `<div class="modal-overlay"><div class="modal-box"><h2>🎲 Powerup Calibration — Question ${qIndex+1}/4</h2><p style="margin-bottom:8px;color:#8cf;font-size:12px">Answer quickly and correctly to strengthen this run's equipped powerups.</p><p style="margin-bottom:16px">${q.q}</p>`;
+        shuffled.forEach(a=>{ html+=`<button class="choice-btn" data-correct="${a.correct}">${a.text}</button>`; });
+        html+=`</div></div>`;
+        modalRoot.innerHTML = html;
+        modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
+            btn.onclick=()=>{
+                let elapsed = (performance.now()-startTime)/1000;
+                let isCorrect = btn.dataset.correct==='true';
+                prerunQuizTimes.push(elapsed);
+                if(isCorrect){ btn.classList.add('correct'); prerunQuizCorrect++; recordCorrectAnswer(); }
+                else { btn.classList.add('wrong'); modalRoot.querySelectorAll('.choice-btn').forEach(b=>{ if(b.dataset.correct==='true') b.classList.add('correct'); }); }
+                modalRoot.querySelectorAll('.choice-btn').forEach(b=>b.onclick=null);
+                qIndex++;
+                setTimeout(nextQ, 800);
+            };
+        });
+    }
+    nextQ();
+}
+
 // ── Weather system ──────────────────────────────────────────────────────────
 // Pity-based random weather: each effect starts at 1% chance per roll and
 // climbs +1% every roll it doesn't trigger; the moment it triggers its own
@@ -172,7 +388,7 @@ function applyDamageToEnemy(e, rawDmg, sourceId){
         e.dead=true;
         kills++;
         let goldReward = e.isWagon ? treasureGoldBonus : 2;
-        gold=Math.min(gold+Math.round(goldReward*waveGoldMult), maxGold);
+        addGold(goldReward*waveGoldMult);
         if(activeAffix==='undead' && e.type!=='wagon' && e.type!=='skeleton' && e.type!=='boss'){
             enemies.push(spawnEnemy('skeleton', e.x));
         }
@@ -237,7 +453,6 @@ const QUESTION_BANK_FILES = {
     '112cf': { file:'question-banks/year-11-chemistry-full.json', name:'Year 11 Chemistry' },
     '11-13dc': { file:'question-banks/senior-dance-choreography.json', name:'Senior Dance Choreography' },
     '11-13dg': { file:'question-banks/senior-dance-genres.json', name:'Senior Dance Genres' },
-    
 };
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -563,7 +778,8 @@ const MAX_ALIVE_ENEMIES = 150;
 
 function startWave() {
     wave++;
-    gold += goldMines*5;
+    if(runPowerupBonuses.stageclear>0) addGold(runPowerupBonuses.stageclear);
+    addGold(goldMines*5);
     if(wallHP>0) castleHP=Math.min(castleHP+wallHP, maxHP);
     if(priestHeal) castleHP=Math.min(castleHP+5, maxHP);
     spawnQueue=[];
@@ -572,12 +788,18 @@ function startWave() {
 
     let isBossWave = (wave%5===0) || forceBossThisWave;
     forceBossThisWave=false;
+    lastWaveWasBoss = isBossWave;
 
     // Weather doesn't re-roll on boss waves — it carries over.
     let weatherChanged=false;
     if(!isBossWave){
-        weatherWavesLeft--;
-        if(weatherWavesLeft<=0){ let prev=activeWeather; rollWeather(); weatherChanged=(activeWeather!==prev); }
+        if(weatherPreRolledForNextWave){
+            weatherPreRolledForNextWave=false;
+            weatherChanged=true; // already rolled early by Watch Towers; just show the result
+        } else {
+            weatherWavesLeft--;
+            if(weatherWavesLeft<=0){ let prev=activeWeather; rollWeather(); weatherChanged=(activeWeather!==prev); }
+        }
     }
 
     if(isBossWave){ showBoss(); return; }
@@ -668,7 +890,10 @@ function startBetweenWave(){
     }
     let nextWave = wave+1;
     let nextIsBoss = nextWave%5===0;
-    if(!nextIsBoss && Math.random()<0.05){
+    let merchantAppears;
+    if(pendingMerchantRoll!==null){ merchantAppears = pendingMerchantRoll; pendingMerchantRoll=null; }
+    else { merchantAppears = !nextIsBoss && Math.random()<0.05; }
+    if(!nextIsBoss && merchantAppears){
         showMerchant(()=>{ betweenWaveQuestions=0; betweenWaveCorrect=0; askBetweenQuestion(); });
     } else {
         betweenWaveQuestions=0; betweenWaveCorrect=0;
@@ -695,6 +920,27 @@ function showMerchant(onDone){
     document.getElementById('merchant-decline').onclick=()=>{ modalRoot.innerHTML=''; onDone(); };
 }
 
+// Study Hall + Apprenticeships trigger together every 4th cumulative correct
+// between-wave answer across the whole run (not just a perfect 4/4 session).
+function grantEducationMilestoneReward(){
+    if(kingdomStudyHallLevel>0){
+        addGold(5*kingdomStudyHallLevel);
+        particles.push({x:70,y:150,vx:0,vy:-1,life:30,color:'#ffcc00',size:6});
+    }
+    if(kingdomApprenticeshipLevel>0 && towers.length>0){
+        let rateTarget = towers[Math.floor(Math.random()*towers.length)];
+        rateTarget.apprenticeRateBonus = (rateTarget.apprenticeRateBonus||0) + 0.005*kingdomApprenticeshipLevel;
+        let dmgTarget = towers[Math.floor(Math.random()*towers.length)];
+        if(dmgTarget.id==='icemage'){
+            dmgTarget.apprenticeFreezeBonus = (dmgTarget.apprenticeFreezeBonus||0) + 0.1*kingdomApprenticeshipLevel;
+        } else if(dmgTarget.id==='poison'){
+            dmgTarget.apprenticeSplashBonus = (dmgTarget.apprenticeSplashBonus||0) + 0.05*kingdomApprenticeshipLevel;
+        } else {
+            dmgTarget.apprenticeDmgBonus = (dmgTarget.apprenticeDmgBonus||0) + 0.5*kingdomApprenticeshipLevel;
+        }
+    }
+}
+
 function askBetweenQuestion(){
     if(betweenWaveQuestions>=4){ showCardSelect(); return; }
     let q=randQ();
@@ -706,7 +952,13 @@ function askBetweenQuestion(){
     modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
         btn.onclick=()=>{
             let isCorrect=btn.dataset.correct==='true';
-            if(isCorrect){ btn.classList.add('correct'); betweenWaveCorrect++; }
+            if(isCorrect){
+                btn.classList.add('correct');
+                betweenWaveCorrect++;
+                totalBetweenWaveCorrect++;
+                recordCorrectAnswer();
+                if(totalBetweenWaveCorrect%4===0) grantEducationMilestoneReward();
+            }
             else { btn.classList.add('wrong'); modalRoot.querySelectorAll('.choice-btn').forEach(b=>{ if(b.dataset.correct==='true') b.classList.add('correct'); }); }
             modalRoot.querySelectorAll('.choice-btn').forEach(b=>b.onclick=null);
             betweenWaveQuestions++;
@@ -731,6 +983,7 @@ const ENEMY_SINGLE_COUNTER = {
 function showCardSelect(){
     if(skipNextCardReward){ skipNextCardReward=false; startWave(); return; }
     let n=Math.max(1,betweenWaveCorrect);
+    if(kingdomAcademyLevel>0 && Math.random()<0.05*kingdomAcademyLevel) n++;
     let options=pickCards(n);
     let html=`<div class="modal-overlay"><div class="modal-box"><h2>${betweenWaveCorrect}/4 Correct! Choose one:</h2><div style="margin-top:16px">`;
     options.forEach((c,i)=>{
@@ -759,6 +1012,35 @@ function showCardSelect(){
         html += `</div>`;
     }
 
+    // Watch Towers: scout report on what's ahead, unlocked in stages.
+    if(kingdomWatchTowerLevel>=1){
+        let nextIsBoss = nextWave%5===0;
+        html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #445;font-size:11px;color:#8cf">🔭 Scout report:</div>`;
+        if(nextIsBoss){
+            html += `<div style="font-size:11px;color:#aaa">A boss looms over the next wave.</div>`;
+        } else {
+            let counts = {};
+            ENEMY_SPAWN_TABLE.forEach(spec=>{ if(nextWave>=spec.unlock){ let c=Math.max(0,Math.floor(spec.count(nextWave))); if(c>0) counts[spec.type]=c; } });
+            let parts = Object.entries(counts).map(([t,c])=>`${c}× ${t.replace(/_/g,' ')}`);
+            html += `<div style="font-size:11px;color:#aaa">Next wave: ${parts.join(', ')||'quiet...'}</div>`;
+        }
+        if(kingdomWatchTowerLevel>=2){
+            if(pendingMerchantRoll===null){
+                let nextNextIsBoss = (nextWave+1)%5===0;
+                pendingMerchantRoll = nextNextIsBoss ? false : (Math.random()<0.05);
+            }
+            html += `<div style="font-size:11px;color:#aaa">${pendingMerchantRoll ? '🧙 A merchant will be waiting after this wave.' : 'No merchant sighted for a while yet.'}</div>`;
+        }
+        if(kingdomWatchTowerLevel>=3 && !nextIsBoss){
+            if(!weatherPreRolledForNextWave && weatherWavesLeft-1<=0){
+                rollWeather();
+                weatherPreRolledForNextWave = true;
+            }
+            let wdef = WEATHER_EFFECTS.find(w=>w.id===activeWeather);
+            html += `<div style="font-size:11px;color:#aaa">${weatherPreRolledForNextWave ? `Weather shifting to ${wdef?wdef.name:'clear skies'}.` : 'Weather looks unchanged for now.'}</div>`;
+        }
+    }
+
     html+=`</div></div>`;
     modalRoot.innerHTML=html;
     modalRoot.querySelectorAll('.card-btn').forEach(btn=>{
@@ -782,7 +1064,13 @@ function showQuestion(){
     modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
         btn.onclick=()=>{
             let isCorrect=btn.dataset.correct==='true';
-            if(isCorrect){ btn.classList.add('correct'); ammo=Math.min(ammo+ammoPerCorrect,maxAmmo); }
+            if(isCorrect){
+                btn.classList.add('correct');
+                recordCorrectAnswer();
+                let libraryProc = kingdomLibraryLevel>0 && Math.random()<0.05*kingdomLibraryLevel;
+                let ammoReward = ammoPerCorrect*(libraryProc?2:1)*(1+runPowerupBonuses.increasedammo);
+                ammo=Math.min(ammo+Math.round(ammoReward),maxAmmo);
+            }
             else { 
                 btn.classList.add('wrong'); 
                 castleHP = Math.max(0, castleHP - 1);
@@ -794,16 +1082,135 @@ function showQuestion(){
     });
 }
 
+// Flavor only — deliberately no mechanical descriptions. Players are meant to
+// discover what each upgrade actually does by noticing their next run feels
+// different, not by reading a tooltip.
+const KINGDOM_FLAVOR = {
+    soldiers:'Hardened veterans man the walls.',
+    archives:'Ancient tomes of forgotten magic.',
+    blacksmith:'The forge never stops ringing.',
+    siegeengineers:'Masters of destructive engineering.',
+    traininggrounds:'A place to drill new recruits. (one-time)',
+    treasury:'Coffers overflow with royal wealth.',
+    marketplace:'Merchants haggle in your favor.',
+    supplydepot:'Crates of arrows, ready to go.',
+    warehouse:'More room to stockpile supplies.',
+    walls:'Stone laid thick and true.',
+    healers:'Menders tend the wounded after battle.',
+    watchtowers:'Keen eyes scan the horizon.',
+    studyhall:'Scholars reward diligent study.',
+    apprenticeships:'Young craftsmen hone their trade.',
+    library:'Knowledge, carefully rationed.',
+    academy:'The finest minds in the realm.',
+};
+
+let kingdomActiveTab = 'permanent';
+
+function renderPermanentTab(){
+    let categories = ['Military','Economy','Castle','Education'];
+    let html = '';
+    categories.forEach(cat=>{
+        html += `<div style="margin-top:14px;font-size:13px;color:#00d4ff;border-bottom:1px solid #445;padding-bottom:4px">${cat}</div>`;
+        KINGDOM_UPGRADES.filter(u=>u.category===cat).forEach(u=>{
+            let level = kingdomLevel(u.id);
+            let maxed = level>=u.maxLevel;
+            let cost = maxed ? null : kingdomUpgradeCost(u);
+            let canAfford = !maxed && kingdomSave.crowns>=cost;
+            html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2a3a;gap:10px">
+                <div>
+                    <div style="font-size:14px">${u.name}</div>
+                    <div style="font-size:10px;color:#888">${KINGDOM_FLAVOR[u.id]||''}</div>
+                    <div style="font-size:10px;color:#4caf50">Level ${level}${u.maxLevel>1?'/'+u.maxLevel:''}</div>
+                </div>
+                <button class="choice-btn kingdom-buy-btn" data-id="${u.id}" style="width:auto;white-space:nowrap;padding:8px 14px;font-size:12px;${maxed?'opacity:0.4;cursor:default;':(!canAfford?'opacity:0.5;':'')}" ${maxed||!canAfford?'disabled':''}>
+                    ${maxed ? 'MAX' : `👑 ${cost}`}
+                </button>
+            </div>`;
+        });
+    });
+    return html;
+}
+
+function renderPowerupsTab(){
+    let slots = kingdomPowerupSlots();
+    let equipped = kingdomSave.equippedPowerups.length;
+    let html = `<p style="font-size:12px;color:#8cf;margin:10px 0">Slots: ${equipped}/${slots} equipped — unlocked permanently by answering questions correctly across all your runs (${kingdomSave.totalCorrectAnswers} lifetime correct so far). Strength is re-rolled each run by a quick 4-question check before you start.</p>`;
+    RUN_POWERUPS.forEach(p=>{
+        let unlocked = kingdomSave.totalCorrectAnswers>=p.unlockAt;
+        let isEquipped = kingdomSave.equippedPowerups.includes(p.id);
+        let atCap = !isEquipped && equipped>=slots;
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2a3a;gap:10px">
+            <div>
+                <div style="font-size:14px">${unlocked?p.name:'🔒 ???'}</div>
+                <div style="font-size:10px;color:#888">${unlocked?'':`Unlocks at ${p.unlockAt} lifetime correct answers (${kingdomSave.totalCorrectAnswers}/${p.unlockAt})`}</div>
+            </div>
+            ${unlocked
+                ? `<button class="choice-btn kingdom-equip-btn" data-id="${p.id}" style="width:auto;white-space:nowrap;padding:8px 14px;font-size:12px;${isEquipped?'background:#2a6a3a;':''}${atCap?'opacity:0.4;':''}" ${atCap?'disabled':''}>${isEquipped?'✓ Equipped':'Equip'}</button>`
+                : `<button class="choice-btn" style="width:auto;padding:8px 14px;font-size:12px;opacity:0.3;cursor:default" disabled>🔒 Locked</button>`}
+        </div>`;
+    });
+    return html;
+}
+
+function renderKingdomHTML(){
+    let html = `<div class="modal-overlay"><div class="modal-box" style="max-width:540px;max-height:85vh;overflow-y:auto;text-align:left">
+        <h2 style="text-align:center">🏰 The Kingdom</h2>
+        <p style="text-align:center;color:#ffcc44;font-size:20px;margin:8px 0 4px">👑 ${kingdomSave.crowns} Crowns</p>`;
+    if(!kingdomStorageOk){
+        html += `<p style="text-align:center;color:#e74c3c;font-size:11px">⚠️ This browser is blocking save data — progress won't persist after you close this tab.</p>`;
+    }
+    html += `<div style="display:flex;gap:8px;margin-top:12px">
+        <button class="choice-btn kingdom-tab-btn" data-tab="permanent" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='permanent'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Permanent Upgrades</button>
+        <button class="choice-btn kingdom-tab-btn" data-tab="powerups" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='powerups'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Single-Run Powerups</button>
+    </div>`;
+    html += kingdomActiveTab==='permanent' ? renderPermanentTab() : renderPowerupsTab();
+    html += `<button class="choice-btn" id="kingdom-close-btn" style="margin-top:16px;text-align:center">Return</button></div></div>`;
+    return html;
+}
+
+function wireKingdomButtons(onClose){
+    modalRoot.querySelectorAll('.kingdom-tab-btn').forEach(btn=>{
+        btn.onclick=()=>{
+            kingdomActiveTab = btn.dataset.tab;
+            modalRoot.innerHTML = renderKingdomHTML();
+            wireKingdomButtons(onClose);
+        };
+    });
+    modalRoot.querySelectorAll('.kingdom-buy-btn').forEach(btn=>{
+        btn.onclick=()=>{
+            if(buyKingdomUpgrade(btn.dataset.id)){
+                modalRoot.innerHTML = renderKingdomHTML();
+                wireKingdomButtons(onClose);
+            }
+        };
+    });
+    modalRoot.querySelectorAll('.kingdom-equip-btn').forEach(btn=>{
+        btn.onclick=()=>{
+            toggleEquipPowerup(btn.dataset.id);
+            modalRoot.innerHTML = renderKingdomHTML();
+            wireKingdomButtons(onClose);
+        };
+    });
+    document.getElementById('kingdom-close-btn').onclick=()=>{ modalRoot.innerHTML=''; onClose(); };
+}
+
+function showKingdom(onClose){
+    modalRoot.innerHTML = renderKingdomHTML();
+    wireKingdomButtons(onClose);
+}
+
 function showStart(){
     modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center">
         <h2>🏰 CASTLE DEFENCE</h2>
         <p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p>
         <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:12px;margin-bottom:16px">
             <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code (ask your teacher — leave blank for general knowledge)</label>
-            <input id="bank-code-input" type="text" placeholder="Class Code Here" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
+            <input id="bank-code-input" type="text" placeholder="Class Code" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
             <div id="bank-status" style="font-size:12px;margin-top:6px;min-height:16px;color:#aaa"></div>
         </div>
         <button class="choice-btn" style="text-align:center;font-size:16px" id="start-btn">⚔️ START GAME</button>
+        <button class="choice-btn" style="text-align:center;font-size:14px;margin-top:8px;background:rgba(0,0,0,0.2)" id="kingdom-btn">🏰 The Kingdom (👑 ${kingdomSave.crowns})</button>
+        ${kingdomSave.equippedPowerups.length ? `<p style="font-size:11px;color:#8cf;margin-top:6px">Equipped: ${kingdomSave.equippedPowerups.map(id=>(RUN_POWERUPS.find(p=>p.id===id)||{}).name).join(', ')}</p>` : ''}
     </div></div>`;
     const input = document.getElementById('bank-code-input');
     const status = document.getElementById('bank-status');
@@ -817,7 +1224,8 @@ function showStart(){
         const result = await loadQuestionBank(input.value);
         if(result.ok){
             modalRoot.innerHTML='';
-            startBetweenWave();
+            applyKingdomStartBonuses();
+            runPrerunQuiz(()=> startBetweenWave());
         } else {
             startBtn.disabled = false;
             startBtn.textContent = '⚔️ START GAME';
@@ -829,12 +1237,27 @@ function showStart(){
     };
     startBtn.onclick = tryStart;
     input.addEventListener('keydown', e=>{ if(e.key==='Enter') tryStart(); });
+    document.getElementById('kingdom-btn').onclick = ()=> showKingdom(()=>showStart());
 }
 
+let gameOverCrownsAwarded = false, lastCrownsEarned = 0;
 function showGameOver(){
     state='gameover';
-    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>💀 GAME OVER</h2><p style="margin:16px 0">You survived ${wave} waves!</p><p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><button class="choice-btn" style="text-align:center" id="restart-btn">🔄 Play Again</button></div></div>`;
+    if(!gameOverCrownsAwarded){
+        lastCrownsEarned = Math.floor(wave*3 + kills*0.2 + gold*0.05);
+        kingdomSave.crowns += lastCrownsEarned;
+        saveKingdomSave();
+        gameOverCrownsAwarded = true;
+    }
+    let unlockHtml = '';
+    if(pendingUnlockNotifications.length){
+        unlockHtml = `<div style="background:rgba(255,204,68,0.12);border:1px solid #ffcc44;border-radius:8px;padding:10px;margin:12px 0">
+            ${pendingUnlockNotifications.map(n=>`<div style="color:#ffcc44;font-size:13px">🎉 ${n}</div>`).join('')}
+        </div>`;
+    }
+    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>💀 GAME OVER</h2><p style="margin:16px 0">You survived ${wave} waves!</p><p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><p style="color:#ffcc44;font-size:16px;margin:12px 0">👑 +${lastCrownsEarned} Crowns earned (Total: ${kingdomSave.crowns})</p>${unlockHtml}${!kingdomStorageOk?'<p style="color:#e74c3c;font-size:11px">⚠️ Save data is blocked in this browser — Crowns won\'t persist after this tab closes.</p>':''}<button class="choice-btn" style="text-align:center" id="kingdom-btn">🏰 Visit The Kingdom</button><button class="choice-btn" style="text-align:center;margin-top:8px" id="restart-btn">🔄 Play Again</button></div></div>`;
     document.getElementById('restart-btn').onclick=()=>{ location.reload(); };
+    document.getElementById('kingdom-btn').onclick=()=> showKingdom(()=>showGameOver());
 }
 
 canvas.addEventListener('click', (e)=>{
@@ -1889,6 +2312,13 @@ function drawEnemy(e, ox, oy, s){
             ctx.beginPath(); ctx.arc(bx, by, 1.5*s, 0, Math.PI*2); ctx.fill();
         }
     }
+    if(e.burnTicks>0){
+        ctx.fillStyle=`rgba(255,${120+Math.floor(Math.sin(animFrame*0.4)*60)},20,0.7)`;
+        for(let i=0;i<2;i++){
+            let bx=ex+4+i*6, by=ey+bob-4-((animFrame*0.9+i*5)%8);
+            ctx.beginPath(); ctx.moveTo(bx,by+3); ctx.lineTo(bx-1.5*s,by); ctx.lineTo(bx,by-3*s); ctx.lineTo(bx+1.5*s,by); ctx.fill();
+        }
+    }
 
     // HP bar — shown once an enemy has taken any damage
     if(e.hp<e.maxHp){
@@ -2194,7 +2624,7 @@ function towerUpdate(t){
     if(towersFrozen>0) return;
     t.cooldown--;
     if(t.cooldown>0) return;
-    let rate = Math.floor(t.rate / globalSpeedMult);
+    let rate = Math.floor(t.rate / globalSpeedMult * kingdomRateMult * (1-(t.apprenticeRateBonus||0)));
     if(activeWeather==='blizzard') rate = Math.floor(rate*1.5); // fires 50% slower
     // Percentage-based range: tower covers from 0% to rangePercent of the stage width (left side)
     let rangePercent = (t.rangePercent !== undefined) ? t.rangePercent : 50;
@@ -2226,6 +2656,8 @@ function towerUpdate(t){
     if(t.id==='axeman') ptype='axe';
     if(t.id==='poison') ptype='poison';
     let dmg=t.dmg*globalDmgMult*waveDmgMult*(t.level>1?1+t.level*0.3:1);
+    if(t.id==='archer' || t.id==='axeman') dmg += kingdomDmgBonusArcherAxe;
+    if(t.apprenticeDmgBonus) dmg += t.apprenticeDmgBonus;
     if(activeWeather==='rain' && t.id==='firemage') dmg *= 0.5; // fire towers weaker in the rain
     let sx=t.x+10, sy=t.y;
 
@@ -2238,6 +2670,7 @@ function towerUpdate(t){
         for(let i=0;i<t.chainCount && current;i++){
             let jumpDmg = dmg*Math.pow(t.chainFalloff,i);
             applyDamageToEnemy(current, jumpDmg, t.id);
+            if(!current.dead) current.frozen = Math.max(current.frozen||0, Math.round(20*kingdomEffectDurationMult));
             hitList.push({x:current.x,y:current.y});
             usedIds.add(current);
             let next=null, nd=t.chainRadius;
@@ -2252,16 +2685,20 @@ function towerUpdate(t){
         return;
     }
 
+    let effSplash = t.splash;
+    if(t.id==='poison' && t.apprenticeSplashBonus) effSplash = t.splash*(1+t.apprenticeSplashBonus);
+    let freezeBonusMult = (t.id==='icemage' && t.apprenticeFreezeBonus) ? (1+t.apprenticeFreezeBonus) : 1;
+
     if(t.id==='ballista' || t.id==='axeman' || t.id==='poison'){
         // Parabolic arc: naturally limits pierce range, since the shot can only
         // hit enemies near ground level (close to launch or close to landing),
         // not everything along a straight line the way a flat shot would.
         let totalLife = Math.max(20, Math.ceil(dist/spd));
         let arcHeight = Math.min(50, 15+dist*0.15);
-        projectiles.push({sx,sy,tx:target.x,ty:target.y,x:sx,y:sy,life:totalLife,totalLife,arcHeight,arc:true,dmg,type:ptype,freeze:t.freeze,splash:t.splash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+        projectiles.push({sx,sy,tx:target.x,ty:target.y,x:sx,y:sy,life:totalLife,totalLife,arcHeight,arc:true,dmg,type:ptype,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
     } else {
         let life = Math.ceil(dist/spd)+15; // enough frames to actually reach the target, regardless of range
-        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life,freeze:t.freeze,splash:t.splash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
     }
 }
 
@@ -2304,12 +2741,21 @@ function gameLoop(time){
                 }
                 if(e.dead) return;
             }
+            if(e.burnTicks>0){
+                e.burnTimer++;
+                if(e.burnTimer>=20){
+                    e.burnTimer=0;
+                    e.burnTicks--;
+                    applyDamageToEnemy(e, e.burnDmgPerTick, e.burnSource);
+                }
+                if(e.dead) return;
+            }
             e.x-=spd;
             e.frameTimer++;
             if(e.frameTimer>8){e.frameTimer=0;e.frame=(e.frame+1)%4;}
             if(e.x<=100){ 
                 // Incremental contact damage (scaled down)
-                castleHP-=e.dmg*0.005*waveContactDmgMult; 
+                castleHP-=e.dmg*0.005*waveContactDmgMult*(1-runPowerupBonuses.luckycharm); 
                 if(e.x<=70){ 
                     // Direct impact / explosive break on reach
                     let fullDmg = 20; // goblin
@@ -2331,7 +2777,7 @@ function gameLoop(time){
                     if(e.type==='bombbeetle') fullDmg = 34;
                     if(e.type==='golemsentinel') fullDmg = 36;
                     if(e.type==='rottedrevenant') fullDmg = 30;
-                    castleHP -= fullDmg*waveContactDmgMult;
+                    castleHP -= fullDmg*waveContactDmgMult*(1-runPowerupBonuses.luckycharm);
                     e.dead=true; 
                 } 
             }
@@ -2374,7 +2820,7 @@ function gameLoop(time){
                 if(e.dead) return;
                 if(p.hitSet && p.hitSet.has(e)) return;
                 if(Math.abs(p.x-e.x)<14 && Math.abs(p.y-e.y)<18 && p.life>0){
-                    if(p.freeze){ e.frozen=60; }
+                    if(p.freeze){ e.frozen=Math.round(60*kingdomEffectDurationMult*(p.freezeBonusMult||1)); }
                     else {
                         applyDamageToEnemy(e, p.dmg, p.sourceTowerId);
                         if(p.poison && !e.dead){
@@ -2383,8 +2829,19 @@ function gameLoop(time){
                             e.poisonSource = p.sourceTowerId;
                             e.poisonTimer = 0;
                         }
+                        if(p.sourceTowerId==='firemage' && !e.dead){
+                            // Fire Mage applies a small burn DOT on top of its direct hit —
+                            // Scholarly Archives extends how long it burns.
+                            e.burnTicks = Math.round(3*kingdomEffectDurationMult);
+                            e.burnDmgPerTick = 1.5;
+                            e.burnSource = p.sourceTowerId;
+                            e.burnTimer = 0;
+                        }
                     }
-                    if(p.splash) enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) applyDamageToEnemy(e2, p.dmg*0.5, p.sourceTowerId); });
+                    if(p.splash){
+                        let splashMult = (p.sourceTowerId==='cannon'||p.sourceTowerId==='poison') ? kingdomSplashBonusMult : 1;
+                        enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) applyDamageToEnemy(e2, p.dmg*0.5*splashMult, p.sourceTowerId); });
+                    }
                     if(p.hitSet) p.hitSet.add(e);
                     if(!p.pierce) p.life=0;
                 }
@@ -2394,7 +2851,7 @@ function gameLoop(time){
             if(p.type==='poison' && p.arc && p.life<=0 && p.hitSet && p.hitSet.size===0 && p.splash){
                 enemies.forEach(e2=>{
                     if(!e2.dead && Math.hypot(e2.x-p.tx,e2.y-p.ty)<p.splash){
-                        applyDamageToEnemy(e2, p.dmg, p.sourceTowerId);
+                        applyDamageToEnemy(e2, p.dmg*kingdomSplashBonusMult, p.sourceTowerId);
                         if(p.poison && !e2.dead){
                             e2.poisonTicks = p.poison.ticks;
                             e2.poisonDmgPerTick = p.poison.dmgPerTick;
@@ -2408,7 +2865,13 @@ function gameLoop(time){
         });
         projectiles=projectiles.filter(p=>p.life>0);
 
-        if(spawnQueue.length===0 && enemies.filter(e=>!e.dead).length===0 && enemies.length===0) startBetweenWave();
+        if(spawnQueue.length===0 && enemies.filter(e=>!e.dead).length===0 && enemies.length===0){
+            if(lastWaveWasBoss && kingdomHealAfterBossPct>0){
+                castleHP = Math.min(maxHP, castleHP + maxHP*kingdomHealAfterBossPct);
+            }
+            lastWaveWasBoss = false;
+            startBetweenWave();
+        }
         if(castleHP<=0){ castleHP=0; showGameOver(); }
         updateHUD();
     }
