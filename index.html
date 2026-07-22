@@ -39,7 +39,7 @@
     <span id="hud-hp">❤️ HP: 100/100</span> <span id="hud-ammo">🏹 Ammo: 3/10</span>
    </div>
    <div class="hud-right">
-    <span id="hud-gold">🪙 Gold: 0</span> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 General Knowledge</span> <span id="hud-weather" style="color:#ffcc44"></span>
+    <span id="hud-gold">🪙 Gold: 0</span> <button id="cashout-btn" style="display:none;margin-left:6px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid #ffcc44;background:rgba(255,204,68,0.15);color:#ffcc44;cursor:pointer;font-family:'Lexend',sans-serif;vertical-align:middle" aria-label="Gold is maxed out — end this run early and bank your Crowns">💰 Gold Maxed — Cash Out</button> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 Loading...</span> <span id="hud-weather" style="color:#ffcc44"></span>
    </div>
   </div><button class="ammo-btn" id="ammo-btn" aria-label="Get ammo by answering a question">🏹 Get Ammo (Q)</button>
   <button class="target-btn" id="target-btn" aria-label="Cycle tower targeting mode">🎯 Targeting: Nearest</button>
@@ -66,13 +66,70 @@ window.addEventListener('resize', resize);
 
 let state = 'start';
 let wave = 0, castleHP = 100, maxHP = 100, ammo = 3, maxAmmo = 10, gold = 0, maxGold = 100, kills = 0;
+// maxHP before Castle Keep's percentage bonus is layered on top — Stone
+// Walls and the Kingdom's Reinforced Walls both add to this directly, while
+// Keep's own bonus is always computed fresh off THIS value (see
+// recomputeMaxHP), so repeat Keep picks can never compound on themselves.
+let maxHPBeforeKeep = 100;
 let enemies = [], projectiles = [], particles = [], towers = [], cards = [];
+// Friendly melee minions spawned periodically by the Necromancer tower.
+// Each one walks to the nearest living enemy inside the tower's range and
+// pokes it for skeletonDmg every ~0.5s, until its lifespan runs out.
+let skeletonAllies = [];
 let betweenWaveQuestions = 0, betweenWaveCorrect = 0;
 let animFrame = 0;
 let castleColor = '#555577', wallHP = 0;
 let globalDmgMult = 1, globalSpeedMult = 1;
 let hasMoat = false, hasKing = false, hasDragon = false, hasMeteor = false, hasElite = false;
+let hasWizard = false, wizardTimer = 0, wizardSpellIndex = 0;
 let dragonTimer = 0, meteorTimer = 0;
+// Tracks how many times each *non-tower* card has been picked this run.
+// Towers keep their own separate dmg/range/rate upgrade cycle (unchanged);
+// every other repeatable card instead gets 50% stronger per repeat pick,
+// via getCardEffectMult() below.
+let cardLevels = {};
+let merchantGoldBonus = 0, commanderCritChance = 0, overclockJamChance = 0;
+let merchantNpcDmgMult = 1; // permanent bonus from the "Glass Cannon" random Merchant NPC deal — survives recomputes below
+function getCardLevel(id){ return cardLevels[id]||0; }
+// Was Math.pow(1.5, lvl-1) — pure geometric compounding, which let a handful
+// of repeat picks on cards like King's Servant or The King spiral into
+// thousands-of-percent bonuses over a long run. Now it's linear: each repeat
+// pick adds a flat +50% of the card's BASE amount, not +50% of whatever the
+// bonus has already grown to. Level 5 is now +200% of base instead of +506%.
+function getCardEffectMult(id){ let lvl=getCardLevel(id); return lvl>0 ? 1 + 0.5*(lvl-1) : 1; }
+// Recomputed from scratch (not multiplied in place) every time a relevant
+// card is picked, so each card's own bonus scales independently off its own
+// level rather than compounding on top of whatever order cards were picked in.
+function recomputeGlobalMultipliers(){
+    let dmgBonus = 0, speedBonus = 0;
+    if(cardLevels['servant']) dmgBonus += 1.0*getCardEffectMult('servant');   // King's Servant: +100% base
+    if(cardLevels['theking']) dmgBonus += 1.0*getCardEffectMult('theking');   // The King: +100% base
+    if(cardLevels['warhorn']) speedBonus += 0.3*getCardEffectMult('warhorn'); // War Horn: +30% base
+    if(cardLevels['theking']) speedBonus += 0.5*getCardEffectMult('theking'); // The King: +50% base
+    if(cardLevels['overclock']) speedBonus += 0.75*getCardEffectMult('overclock'); // Overclock: +75% base, risky
+    globalDmgMult = (1+dmgBonus)*merchantNpcDmgMult;
+    globalSpeedMult = 1+speedBonus;
+    merchantGoldBonus = cardLevels['merchant'] ? 0.2*getCardEffectMult('merchant') : 0;       // Merchant: +20% gold base
+    commanderCritChance = cardLevels['commander'] ? Math.min(1, 0.05*getCardEffectMult('commander')) : 0; // Commander: 5% crit base
+    // Overclock's downside scales with it too — the faster it fires, the more it jams. Capped so towers never go fully silent.
+    overclockJamChance = cardLevels['overclock'] ? Math.min(0.4, 0.12*getCardEffectMult('overclock')) : 0;
+}
+
+// Castle Keep's percentage bonus is always computed fresh from its own level
+// against maxHPBeforeKeep (Kingdom Walls + Stone Walls' flat additions) —
+// never against the current, already-boosted maxHP. That's what stops
+// repeat Keep picks from compounding on themselves (2x, then 2.5x AGAIN on
+// top of the already-doubled value, etc.) into absurd numbers.
+function recomputeMaxHP(){
+    let oldMax = maxHP;
+    let keepMult = cardLevels['keep'] ? (1 + 1.0*getCardEffectMult('keep')) : 1; // Keep: +100% base
+    maxHP = Math.round(maxHPBeforeKeep * keepMult);
+    // Top up castleHP by however much the cap just grew, rather than always
+    // fully healing — consistent whether the increase came from Stone Walls
+    // or Castle Keep, and doesn't turn Keep into a free full-heal button.
+    if(maxHP > oldMax) castleHP = Math.min(castleHP + (maxHP-oldMax), maxHP);
+    else castleHP = Math.min(castleHP, maxHP);
+}
 let townBuildings = 0;
 
 function addTownBuilding() {
@@ -162,6 +219,7 @@ function buyKingdomUpgrade(id){
 let kingdomDmgBonusArcherAxe = 0, kingdomEffectDurationMult = 1, kingdomRateMult = 1, kingdomSplashBonusMult = 1;
 let kingdomGoldMult = 1, kingdomHealAfterBossPct = 0, kingdomWatchTowerLevel = 0;
 let kingdomStudyHallLevel = 0, kingdomApprenticeshipLevel = 0, kingdomLibraryLevel = 0, kingdomAcademyLevel = 0;
+let kingdomHealersSkeletonBonus = 0; // Royal Healers also strengthens the Necromancer tower — see applyKingdomStartBonuses
 let totalBetweenWaveCorrect = 0;
 let lastWaveWasBoss = false;
 let pendingMerchantRoll = null; // Watch Tower lvl2 pre-roll, consumed by the next startBetweenWave
@@ -174,14 +232,19 @@ function applyKingdomStartBonuses(){
     kingdomSplashBonusMult = 1 + 0.05*kingdomLevel('siegeengineers');
     kingdomGoldMult = 1 + 0.1*kingdomLevel('treasury');
     kingdomHealAfterBossPct = 0.01*kingdomLevel('healers');
+    // Royal Healers also raises Necromancer's dead: +1 skeleton per 5 levels.
+    kingdomHealersSkeletonBonus = Math.floor(kingdomLevel('healers')/5);
     kingdomWatchTowerLevel = kingdomLevel('watchtowers');
     kingdomStudyHallLevel = kingdomLevel('studyhall');
     kingdomApprenticeshipLevel = kingdomLevel('apprenticeships');
     kingdomLibraryLevel = kingdomLevel('library');
     kingdomAcademyLevel = kingdomLevel('academy');
     totalBetweenWaveCorrect = 0;
+    runDoubleEnemies = false; runGoldMult = 1;
+    runNoCardRewards = false; runCorrectAnswersGiveGold = false;
 
-    maxHP = 100 + kingdomLevel('walls')*5;
+    maxHPBeforeKeep = 100 + kingdomLevel('walls')*5;
+    maxHP = maxHPBeforeKeep;
     castleHP = maxHP;
     maxAmmo = 10 + kingdomLevel('warehouse');
     ammo = 3 + kingdomLevel('supplydepot');
@@ -192,10 +255,11 @@ function applyKingdomStartBonuses(){
     }
 }
 
-// Adds gold respecting the Treasury bonus, this run's Golden Touch bonus (if
-// equipped), and the gold cap — the single path every gold reward goes through.
+// Adds gold respecting the Treasury bonus, the Merchant card's bonus, this
+// run's Golden Touch bonus (if equipped), and the gold cap — the single path
+// every gold reward goes through.
 function addGold(amount){
-    gold = Math.min(gold + Math.round(amount*kingdomGoldMult*(1+(runPowerupBonuses.goldentouch||0))), maxGold);
+    gold = Math.min(gold + Math.round(amount*kingdomGoldMult*runGoldMult*(1+merchantGoldBonus)*(1+(runPowerupBonuses.goldentouch||0))), maxGold);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -233,11 +297,36 @@ function checkKingdomUnlockNotifications(){
     });
 }
 
+// Card ids that just crossed their unlockAt threshold, queued up so the very
+// next card-selection screen guarantees that card as one of the choices —
+// regardless of its normal rarity weighting — so the player gets to try it
+// right away instead of waiting on the random draw.
+let pendingCardUnlocks = [];
+// Set by Twin Fate: the very next card the player picks (in the very next
+// selection screen) gets its normal pick effect applied a second time —
+// i.e. a brand new tower comes in pre-upgraded a level, or a repeat pick
+// jumps two levels/effect-tiers at once instead of one.
+let pendingDoubleNextCard = false;
+function checkCardUnlocks(){
+    let c = kingdomSave.totalCorrectAnswers;
+    allCards.forEach(card=>{
+        let at = card.unlockAt||0;
+        if(at<=0) return; // starter cards are never "newly" unlocked
+        let key = 'card_'+card.id;
+        if(c>=at && !kingdomSave.notifiedThresholds.includes(key)){
+            kingdomSave.notifiedThresholds.push(key);
+            pendingUnlockNotifications.push(`${card.name} unlocked!`);
+            pendingCardUnlocks.push(card.id);
+        }
+    });
+}
+
 // Every correct answer anywhere in the game (ammo questions, between-wave
 // questions, and the pre-run calibration quiz) counts toward lifetime totals.
 function recordCorrectAnswer(){
     kingdomSave.totalCorrectAnswers++;
     checkKingdomUnlockNotifications();
+    checkCardUnlocks();
     saveKingdomSave();
 }
 
@@ -338,6 +427,11 @@ const AFFIX_DEFS = [
     { id:'guard',    name:'🛡️ Royal Guard',       desc:'Only heavily-armored knights this wave' },
     { id:'undead',   name:'💀 Undead Rising',     desc:'Slain enemies rise again as skeletons' },
     { id:'caravan',  name:'💰 Treasure Caravan',  desc:'Kill the gold wagons for bonus gold!' },
+    { id:'vanguard',      name:'💨 Swift Vanguard',   desc:'Every enemy moves 60% faster this wave' },
+    { id:'ironlegion',    name:'🗿 Iron Legion',      desc:'Only heavily-armored specialists — bring the right counters' },
+    { id:'skyswarm',      name:'🦅 Sky Swarm',        desc:'Fast, fragile enemies in overwhelming numbers' },
+    { id:'cindermarch',   name:'🔥 Cinder March',     desc:'Fire-touched enemies that hit harder up close' },
+    { id:'mixedvanguard', name:'🎭 Mixed Vanguard',   desc:'One of every specialist type — no single tower clears it all' },
 ];
 let activeAffix = null;
 let treasureGoldBonus = 15;
@@ -346,20 +440,26 @@ let treasureGoldBonus = 15;
 let waveGoldMult = 1, waveDmgMult = 1, waveContactDmgMult = 1;
 let skipNextCardReward = false, forceBossThisWave = false;
 let pendingFreeTowerAfterBoss = false, forceNextWaveDoubleEnemies = false, skipThisWaveSpawns = false;
+// Set by the Merchant's "Double Trouble" and "Midas Run" offers — unlike the
+// other Merchant effects (which apply for one wave, or are truly permanent
+// stat changes), these last for the rest of the CURRENT run, then reset back
+// to normal on the next run.
+let runDoubleEnemies = false, runGoldMult = 1;
+let runNoCardRewards = false, runCorrectAnswersGiveGold = false;
 
 const MERCHANT_OFFERS = [
-    { name:'Double Trouble', risk:'Double enemies next wave', reward:'Double gold this wave',
-      apply(){ forceNextWaveDoubleEnemies=true; waveGoldMult*=2; } },
+    { name:'Double Trouble', risk:'Double enemies for the rest of the run', reward:'Double gold for the rest of the run',
+      apply(){ runDoubleEnemies=true; runGoldMult*=2; } },
     { name:'Bring the Boss', risk:'A boss fight begins immediately', reward:'Free tower once the boss falls',
       apply(){ forceBossThisWave=true; pendingFreeTowerAfterBoss=true; } },
     { name:'Fragile Kingdom', risk:'Castle max health quartered (permanent)', reward:'Ammo per correct answer doubled (permanent)',
-      apply(){ maxHP=Math.max(10,Math.floor(maxHP/4)); castleHP=Math.min(castleHP,maxHP); ammoPerCorrect*=2; } },
+      apply(){ maxHPBeforeKeep=Math.max(10,Math.floor(maxHPBeforeKeep/4)); recomputeMaxHP(); ammoPerCorrect*=2; } },
     { name:'Reckless Barrage', risk:'Castle takes double contact damage this wave', reward:'Towers deal +50% damage this wave',
       apply(){ waveContactDmgMult*=2; waveDmgMult*=1.5; } },
-    { name:'Midas Wave', risk:'No card reward after this wave', reward:'Triple gold this wave',
-      apply(){ skipNextCardReward=true; waveGoldMult*=3; } },
+    { name:'Midas Run', risk:'No card rewards for the rest of this run', reward:'Correct answers instead award gold directly, for the rest of the run',
+      apply(){ runNoCardRewards=true; runCorrectAnswersGiveGold=true; } },
     { name:'Glass Cannon', risk:'Max ammo capacity halved (permanent)', reward:'Global damage doubled (permanent)',
-      apply(){ maxAmmo=Math.max(1,Math.floor(maxAmmo/2)); ammo=Math.min(ammo,maxAmmo); globalDmgMult*=2; } },
+      apply(){ maxAmmo=Math.max(1,Math.floor(maxAmmo/2)); ammo=Math.min(ammo,maxAmmo); merchantNpcDmgMult*=2; recomputeGlobalMultipliers(); } },
     { name:'Blood Moon Pact', risk:"Next wave's enemy count is doubled", reward:'This wave is instantly cleared',
       apply(){ forceNextWaveDoubleEnemies=true; skipThisWaveSpawns=true; } },
     { name:'Desperate Gambit', risk:'Enemies deal double contact damage this wave', reward:'Castle heals to full right now',
@@ -408,33 +508,11 @@ for(let i=0;i<80;i++) stars.push({x:Math.random()*GAME_W, y:Math.random()*140, b
 const mts1 = [], mts2 = [];
 for(let i=0;i<=16;i++){ mts1.push(180+Math.sin(i*0.7)*25+Math.random()*10); mts2.push(195+Math.sin(i*0.5+2)*15+Math.random()*8); }
 
-// Default / fallback question bank (used when no code is entered, or a code fails to load)
-const defaultQuestions = [
-    {q:"What is 7 × 8?", a:["56","48","64","72"], c:0},
-    {q:"Capital of France?", a:["Berlin","Paris","Madrid","Rome"], c:1},
-    {q:"Largest planet?", a:["Mars","Jupiter","Saturn","Earth"], c:1},
-    {q:"H2O is?", a:["Oxygen","Hydrogen","Water","Carbon"], c:2},
-    {q:"Speed of light medium?", a:["Sound","Vacuum","Water","Glass"], c:1},
-    {q:"Year WW2 ended?", a:["1944","1945","1946","1943"], c:1},
-    {q:"Smallest prime?", a:["1","2","3","0"], c:1},
-    {q:"NZ capital?", a:["Auckland","Wellington","Christchurch","Hamilton"], c:1},
-    {q:"Opposite of 'ancient'?", a:["Old","Modern","Classic","Historic"], c:1},
-    {q:"Bones in human body?", a:["106","206","306","186"], c:1},
-    {q:"What is 12²?", a:["124","144","134","154"], c:1},
-    {q:"Largest ocean?", a:["Atlantic","Indian","Pacific","Arctic"], c:2},
-    {q:"Who wrote Hamlet?", a:["Dickens","Shakespeare","Austen","Tolkien"], c:1},
-    {q:"Chemical symbol for Gold?", a:["Go","Gd","Au","Ag"], c:2},
-    {q:"Continent with most countries?", a:["Asia","Europe","Africa","S. America"], c:2},
-    {q:"Square root of 81?", a:["7","8","9","10"], c:2},
-    {q:"Fastest land animal?", a:["Lion","Cheetah","Horse","Leopard"], c:1},
-    {q:"How many sides on hexagon?", a:["5","6","7","8"], c:1},
-    {q:"Who painted Mona Lisa?", a:["Picasso","Da Vinci","Van Gogh","Monet"], c:1},
-    {q:"What gas do plants absorb?", a:["O2","N2","CO2","H2"], c:2},
-];
-
-// Active question bank used by the game. Starts as the default/general knowledge bank.
-let questions = defaultQuestions;
-let currentBankName = 'General Knowledge';
+// Active question bank used by the game. There is no default/general-
+// knowledge bank anymore — the game cannot start until a valid teacher/
+// subject code is entered and its bank successfully loads (see loadQuestionBank).
+let questions = null;
+let currentBankName = '';
 let currentBankCode = '';
 
 function randQ() { return questions[Math.floor(Math.random()*questions.length)]; }
@@ -454,21 +532,16 @@ const QUESTION_BANK_FILES = {
     '11-13dc': { file:'question-banks/senior-dance-choreography.json', name:'Senior Dance Choreography' },
     '11-13dg': { file:'question-banks/senior-dance-genres.json', name:'Senior Dance Genres' },
     'science': { file:'question-banks/year-9-science-full.json', name:'Science Quiz' },
-    'chef': { file:'question-banks/cooking.json', name:'Chef Knowledge' },
-    
 };
 // ────────────────────────────────────────────────────────────────────────────
 
 // Loads a question bank by teacher/subject code, e.g. "93bf" -> Year 9 Biology.
+// A valid code is REQUIRED — there is no general-knowledge fallback, so an
+// empty or unrecognised code always fails and the game cannot start.
 // Bank files use the format: [{ "q": "...", "o": ["opt1","opt2","opt3","opt4"], "a": correctIndex }, ...]
 async function loadQuestionBank(code) {
     code = (code||'').trim().toLowerCase();
-    if(!code) {
-        questions = defaultQuestions;
-        currentBankName = 'General Knowledge';
-        currentBankCode = '';
-        return { ok:true, name: currentBankName };
-    }
+    if(!code) return { ok:false, error:'code-required' };
     const entry = QUESTION_BANK_FILES[code];
     if(!entry) return { ok:false, error:'code-not-found' };
     try {
@@ -531,32 +604,41 @@ const bossDefs = [
       abilities:[{type:'ranged', dmg:9, rate:130, effect:'fire'}, {type:'enrage', threshold:0.3, speedMult:1.8}] },
 ];
 
+// Every card carries an `unlockAt` — the number of lifetime correct answers
+// (kingdomSave.totalCorrectAnswers, same counter the Kingdom powerups use)
+// needed before it can ever appear in a card-selection screen. The four
+// starter cards (archer, storehouse, axeman, moat) are unlocked from the
+// very first run so a new player always has a tower, an economy card, a
+// defence card, and a second tower option to build with. Everything else
+// unlocks gradually — see checkCardUnlocks() / renderCardsTab().
 const allCards = [
-    {id:'archer',name:'🏹 Archer Tower',desc:'Auto-shoots nearest enemy',type:'tower',group:'towers',groupWeight:60,cardWeight:60,dmg:10,rate:160,range:256,rangePercent:50,color:'#88aa44'},
-    {id:'ballista',name:'⚡ Ballista',desc:'Long range, pierces',type:'tower',group:'towers',groupWeight:60,cardWeight:20,dmg:10,rate:240,range:512,rangePercent:100,color:'#aabb66',pierce:true},
-    {id:'cannon',name:'💣 Cannon',desc:'Slow, huge explosions',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:40,rate:500,range:205,rangePercent:40,color:'#665544',splash:30},
-    {id:'firemage',name:'🔥 Fire Mage',desc:'Casts fireballs',type:'tower',group:'towers',groupWeight:60,cardWeight:5,dmg:12,rate:160,range:282,rangePercent:55,color:'#ff6600'},
-    {id:'icemage',name:'❄️ Ice Mage',desc:'Freezes groups',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:0,rate:300,range:307,rangePercent:60,color:'#44ccff',freeze:true},
-    {id:'axeman',name:'🪓 Axeman',desc:'Short burst axes',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:10,rate:80,range:179,rangePercent:35,color:'#aa6633'},
-    {id:'lightning',name:'⚡ Lightning Tower',desc:'Instant chain strike, no travel time',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:9,rate:190,range:230,rangePercent:45,color:'#ffee44',chainCount:3,chainFalloff:0.6,chainRadius:70},
-    {id:'poison',name:'🧪 Alchemist Tower',desc:'Lobs a poison flask in an arc — misses shatter into a poison splash',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:3,rate:170,range:256,rangePercent:50,color:'#77aa22',poison:{ticks:6,dmgPerTick:2.5},splash:22},
-    {id:'goldmine',name:'💰 Gold Mine',desc:'+5 gold per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45},
-    {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max gold',type:'economy',group:'economy',groupWeight:20,cardWeight:45},
-    {id:'merchant',name:'🛒 Merchant',desc:'Upgrades cost less',type:'economy',group:'economy',groupWeight:20,cardWeight:10},
-    {id:'repair',name:'🧱 Repair Wall',desc:'Heal 10 HP per wave',type:'defence',group:'defence',groupWeight:10,cardWeight:30},
-    {id:'stonewalls',name:'🛡️ Stone Walls',desc:'+30 max HP',type:'defence',group:'defence',groupWeight:10,cardWeight:40},
-    {id:'moat',name:'🌊 Moat',desc:'Slows enemies',type:'defence',group:'defence',groupWeight:10,cardWeight:30},
-    {id:'servant',name:'👑 King\'s Servant',desc:'+100% damage',type:'buff',group:'buff',groupWeight:6,cardWeight:20},
-    {id:'warhorn',name:'📯 War Horn',desc:'Faster attacks',type:'buff',group:'buff',groupWeight:6,cardWeight:20},
-    {id:'commander',name:'⚔️ Commander',desc:'All towers faster',type:'buff',group:'buff',groupWeight:6,cardWeight:40},
-    {id:'priest',name:'🙏 Priest',desc:'Slowly heals castle',type:'buff',group:'buff',groupWeight:6,cardWeight:20},
-    {id:'dragon',name:'🐉 Dragon',desc:'Breathes fire occasionally',type:'rare',group:'rare',groupWeight:3,cardWeight:33.33},
-    {id:'lightning',name:'⚡ Lightning Tower',desc:'Random lightning',type:'rare',group:'rare',groupWeight:3,cardWeight:33.33},
-    {id:'wizard',name:'🧙 Wizard',desc:'Random spells',type:'rare',group:'rare',groupWeight:3,cardWeight:33.34},
-    {id:'keep',name:'🏰 Castle Keep',desc:'Double health',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25},
-    {id:'elite',name:'⚔️ Elite Warriors',desc:'Triple spread shot',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25},
-    {id:'meteor_card',name:'☄️ Meteor',desc:'Occasional meteor',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25},
-    {id:'theking',name:'👑 The King',desc:'Massive global buff',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25},
+    {id:'archer',name:'🏹 Archer Tower',desc:'Auto-shoots nearest enemy',type:'tower',group:'towers',groupWeight:60,cardWeight:60,dmg:10,rate:160,range:256,rangePercent:50,color:'#88aa44',unlockAt:0},
+    {id:'ballista',name:'⚡ Ballista',desc:'Long range, pierces',type:'tower',group:'towers',groupWeight:60,cardWeight:20,dmg:10,rate:480,range:512,rangePercent:100,color:'#aabb66',pierce:true,unlockAt:12},
+    {id:'cannon',name:'💣 Cannon',desc:'Slow, huge explosions',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:40,rate:500,range:205,rangePercent:40,color:'#665544',splash:30,unlockAt:28},
+    {id:'firemage',name:'🔥 Fire Mage',desc:'Casts fireballs',type:'tower',group:'towers',groupWeight:60,cardWeight:5,dmg:12,rate:160,range:282,rangePercent:55,color:'#ff6600',unlockAt:22},
+    {id:'icemage',name:'❄️ Ice Mage',desc:'Freezes groups',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:0,rate:300,range:307,rangePercent:60,color:'#44ccff',freeze:true,unlockAt:32},
+    {id:'axeman',name:'🪓 Axeman',desc:'Short burst axes',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:10,rate:80,range:179,rangePercent:35,color:'#aa6633',unlockAt:0},
+    {id:'poison',name:'🧪 Alchemist Tower',desc:'Lobs a poison flask in an arc — misses shatter into a poison splash',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:3,rate:170,range:256,rangePercent:50,color:'#77aa22',poison:{ticks:6,dmgPerTick:2.5},splash:22,unlockAt:18},
+    {id:'necromancer',name:'💀 Necromancer Tower',desc:'Resurrects a skeleton that melees nearby enemies',type:'tower',group:'towers',groupWeight:60,cardWeight:8,dmg:6,rate:300,range:230,rangePercent:45,color:'#3a3a4a',skeletonCount:1,unlockAt:38},
+    {id:'goldmine',name:'💰 Gold Mine',desc:'+5 gold per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:8},
+    {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max gold',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:0},
+    {id:'merchant',name:'🛒 Merchant',desc:'+20% gold earned',type:'economy',group:'economy',groupWeight:20,cardWeight:10,unlockAt:26},
+    {id:'repair',name:'🧱 Repair Wall',desc:'Heal 10 HP per wave',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:10},
+    {id:'stonewalls',name:'🛡️ Stone Walls',desc:'+30 max HP',type:'defence',group:'defence',groupWeight:10,cardWeight:40,unlockAt:16},
+    {id:'moat',name:'🌊 Moat',desc:'Slows enemies',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:0},
+    {id:'servant',name:'👑 King\'s Servant',desc:'+100% damage',type:'buff',group:'buff',groupWeight:6,cardWeight:20,unlockAt:44},
+    {id:'warhorn',name:'📯 War Horn',desc:'Faster attacks',type:'buff',group:'buff',groupWeight:6,cardWeight:20,unlockAt:24},
+    {id:'commander',name:'⚔️ Commander',desc:'All towers gain a chance to crit for double damage',type:'buff',group:'buff',groupWeight:6,cardWeight:40,unlockAt:34},
+    {id:'overclock',name:'⚙️ Overclock',desc:'+75% attack speed for all towers, but every shot has a chance to jam and do nothing',type:'buff',group:'buff',groupWeight:6,cardWeight:15,unlockAt:42},
+    {id:'priest',name:'🙏 Priest',desc:'Slowly heals castle',type:'buff',group:'buff',groupWeight:6,cardWeight:20,unlockAt:14},
+    {id:'dragon',name:'🐉 Dragon',desc:'Breathes fire occasionally',type:'rare',group:'rare',groupWeight:3,cardWeight:25,unlockAt:55},
+    {id:'lightning',name:'⚡ Lightning Tower',desc:'Instant chain strike, no travel time',type:'tower',group:'rare',groupWeight:3,cardWeight:25,dmg:9,rate:190,range:230,rangePercent:45,color:'#ffee44',chainCount:3,chainFalloff:0.6,chainRadius:70,unlockAt:65},
+    {id:'wizard',name:'🧙 Wizard',desc:'Cycles fire, ice & lightning spells',type:'rare',group:'rare',groupWeight:3,cardWeight:25,unlockAt:75},
+    {id:'twinfate',name:'🔮 Twin Fate',desc:'The next card you choose is upgraded twice',type:'rare',group:'rare',groupWeight:3,cardWeight:25,unlockAt:60},
+    {id:'keep',name:'🏰 Castle Keep',desc:'Double health',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:90},
+    {id:'elite',name:'⚔️ Elite Warriors',desc:'Triple spread shot',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:105},
+    {id:'meteor_card',name:'☄️ Meteor',desc:'Periodically strikes the strongest enemy with a splash impact',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:120},
+    {id:'theking',name:'👑 The King',desc:'Massive global buff',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:140},
 ];
 
 // Tower upgrade cycle definitions
@@ -567,21 +649,30 @@ const towerUpgradeCycles = {
     firemage: ['dmg','range','rate'],
     icemage: ['range','rate','range'],
     axeman: ['dmg','rate','range'],
+    necromancer: ['count','rate','dmg'],
 };
 
+// Only cards the player has unlocked (see allCards[].unlockAt and
+// checkCardUnlocks) can ever be drawn into a card-selection screen.
+function getUnlockedCards(){
+    return allCards.filter(c => (c.unlockAt||0) <= kingdomSave.totalCorrectAnswers);
+}
+
 function pickCards(n) {
+    let pool = getUnlockedCards();
     let picked = [];
-    for(let i=0;i<n;i++){
+    let guard = 0;
+    while(picked.length < n && picked.length < pool.length && guard < 500){
+        guard++;
         let groupPool = [];
-        allCards.forEach(c => { for(let j=0;j<c.groupWeight;j++) groupPool.push(c.group); });
+        pool.forEach(c => { for(let j=0;j<c.groupWeight;j++) groupPool.push(c.group); });
+        if(!groupPool.length) break;
         let selectedGroup = groupPool[Math.floor(Math.random()*groupPool.length)];
-        let cardsInGroup = allCards.filter(c => c.group === selectedGroup);
+        let cardsInGroup = pool.filter(c => c.group === selectedGroup);
         let cardPool = [];
         cardsInGroup.forEach(c => { for(let j=0;j<c.cardWeight;j++) cardPool.push(c); });
         let card = cardPool[Math.floor(Math.random()*cardPool.length)];
         if(!picked.find(p=>p.id===card.id)) picked.push(card);
-        else i--;
-        if(picked.length >= allCards.length) break;
     }
     return picked;
 }
@@ -616,6 +707,7 @@ function applyCard(card) {
             else if(stat === 'range'){ existing.rangePercent = Math.min(100, Math.floor(existing.rangePercent * 1.25)); existing.range = Math.floor(existing.rangePercent * GAME_W / 100); }
             else if(stat === 'rate') existing.rate = Math.max(10, Math.floor(existing.rate * 0.75));
             else if(stat === 'splash') existing.splash = (existing.splash || 30) + 15;
+            else if(stat === 'count') existing.skeletonCount = (existing.skeletonCount || 1) + 1;
             addTownBuilding();
             return;
         }
@@ -628,27 +720,40 @@ function applyCard(card) {
     if(card.type !== 'tower') {
         addTownBuilding();
     }
-    cards.push({...card, level:1});
-    if(card.id==='goldmine') goldMines++;
-    if(card.id==='storehouse'){ maxAmmo+=5; maxGold+=50; }
-    if(card.id==='repair') wallHP+=10;
-    if(card.id==='stonewalls'){ maxHP+=30; castleHP=Math.min(castleHP+30,maxHP); castleColor='#667799'; }
-    if(card.id==='moat') hasMoat=true;
-    if(card.id==='servant') globalDmgMult*=2;
-    if(card.id==='warhorn') globalSpeedMult*=1.3;
-    if(card.id==='commander') globalSpeedMult*=1.2;
-    if(card.id==='priest') priestHeal=true;
-    if(card.id==='dragon') hasDragon=true;
-    if(card.id==='keep'){ maxHP*=2; castleHP=maxHP; }
-    if(card.id==='elite') hasElite=true;
-    if(card.id==='meteor_card') hasMeteor=true;
-    if(card.id==='theking'){ globalDmgMult*=2; globalSpeedMult*=1.5; hasKing=true; }
+    if(card.type === 'tower') return; // tower placement/upgrade already handled + returned above for existing towers, and applied above for new ones
+
+    // Non-tower cards: bump this card's own level, then every effect below
+    // scales off getCardEffectMult(card.id) — 1x on first pick, 1.5x on the
+    // second, 2.25x on the third, etc. Recomputed fresh each time (not
+    // multiplied in place) so order-of-pickup never matters.
+    cardLevels[card.id] = (cardLevels[card.id]||0) + 1;
+    cards.push({...card, level:cardLevels[card.id]});
+    let m = getCardEffectMult(card.id);
+
+    if(card.id==='goldmine') goldMines = 1; // presence flag; magnitude read via getCardEffectMult at wave start
+    if(card.id==='storehouse'){ maxAmmo+=Math.round(5*m); maxGold+=Math.round(50*m); }
+    if(card.id==='repair') wallHP+=Math.round(10*m);
+    if(card.id==='stonewalls'){ let bonus=Math.round(30*m); maxHPBeforeKeep+=bonus; recomputeMaxHP(); castleColor='#667799'; }
+    if(card.id==='moat') hasMoat=true; // magnitude (slow strength) read via getCardEffectMult('moat') where the slow is applied
+    if(card.id==='priest') priestHeal=true; // magnitude read via getCardEffectMult('priest') at heal time
+    if(card.id==='dragon') hasDragon=true; // magnitude read via getCardEffectMult('dragon') when it breathes fire
+    if(card.id==='wizard') hasWizard=true; // magnitude read via getCardEffectMult('wizard') when it casts
+    if(card.id==='keep') recomputeMaxHP();
+    if(card.id==='elite') hasElite=true; // shot count read via getCardLevel('elite') on manual fire
+    if(card.id==='meteor_card') hasMeteor=true; // magnitude read via getCardEffectMult('meteor_card') on impact
+    if(card.id==='theking') hasKing=true;
+    if(card.id==='twinfate') pendingDoubleNextCard = true; // consumed by the next card the player picks, see showCardSelect's click handler
+    recomputeGlobalMultipliers();
 }
 
 function spawnEnemy(type, x) {
     let e = {x: x||GAME_W+10, y: 225+Math.random()*20, type, frame:0, frameTimer:0, hp:10, maxHp:10, speed:0.4, dmg:5, frozen:0, dead:false, deathTimer:0};
-    if(type==='goblin'){e.hp=5+wave*2;e.speed=0.5;e.dmg=3;}
-    if(type==='skeleton'){e.hp=10+wave*3;e.speed=0.35;e.dmg=5;}
+    // Goblin and Skeleton counts already grow with wave² (see ENEMY_SPAWN_TABLE)
+    // so their HP is fixed rather than also scaling with wave — otherwise late
+    // waves would combine a quadratically-growing swarm with individually
+    // tankier units too, compounding into an unfair difficulty spike.
+    if(type==='goblin'){e.hp=5;e.speed=0.5;e.dmg=3;}
+    if(type==='skeleton'){e.hp=15;e.speed=0.35;e.dmg=5;}
     if(type==='knight'){e.hp=25+wave*3;e.speed=0.3;e.dmg=8;}
     if(type==='wolf'){e.hp=6+wave;e.speed=0.8;e.dmg=4;}
     if(type==='siege'){e.hp=75+wave*5;e.speed=0.2;e.dmg=15;}
@@ -665,11 +770,18 @@ function spawnEnemy(type, x) {
     if(type==='bombbeetle'){e.hp=35+wave*4;e.speed=0.3;e.dmg=7;e.onlyVulnerableTo=['cannon'];e.resistMult=0.12;}
     if(type==='golemsentinel'){e.hp=40+wave*5;e.speed=0.25;e.dmg=8;e.onlyVulnerableTo=['lightning'];e.resistMult=0.12;}
     if(type==='rottedrevenant'){e.hp=32+wave*4;e.speed=0.28;e.dmg=6;e.onlyVulnerableTo=['poison'];e.resistMult=0.12;}
+    if(type==='skyraider'){e.hp=8+wave*1.8;e.speed=0.95;e.dmg=4+Math.floor(wave/10);e.flying=true;}
+    if(type==='wyvern'){e.hp=34+wave*4;e.speed=0.22;e.dmg=9+Math.floor(wave/8);e.flying=true;}
+    if(type==='stoneburrower'){e.hp=40+wave*5;e.speed=0.18;e.dmg=6+Math.floor(wave/12);e.underground=true;}
+    if(type==='graveworm'){e.hp=18+wave*2.5;e.speed=0.16;e.dmg=11+Math.floor(wave/6);e.underground=true;}
     if(type==='boss'){
         let def = currentBossDef || bossDefs[0];
-        e.hp=Math.floor((100+wave*20)*def.hpMult);
-        e.speed=0.25*def.speedMult;
-        e.dmg=Math.floor(20*def.dmgMult);
+        // Base numbers bumped up across the board, and damage/speed now scale
+        // with wave too (previously only HP did) — a wave 40 boss should feel
+        // meaningfully scarier than a reskinned wave 10 boss, not just spongier.
+        e.hp=Math.floor((130+wave*26)*def.hpMult);
+        e.speed=(0.25+Math.min(0.18, wave*0.0035))*def.speedMult;
+        e.dmg=Math.floor((22+wave*0.7)*def.dmgMult);
         e.y=230;
         e.bossDef=def;
         e.bossId=def.id;
@@ -687,23 +799,35 @@ function spawnEnemy(type, x) {
     return e;
 }
 
-// Runs each frame for a living boss enemy: handles summon/ranged/dash/shield/lifesteal/freeze/enrage abilities
+// Runs each frame for a living boss enemy: handles summon/ranged/dash/shield/lifesteal/freeze/enrage abilities.
+// Every ability reads its base numbers straight off bossDef (shared/reused
+// across every boss fight), then scales them live off the CURRENT wave —
+// never mutates the shared def itself, so there's no risk of compounding
+// across multiple boss fights or multiple simultaneous bosses.
 function bossUpdate(e){
     if(!e.bossDef) return;
     e.bossDef.abilities.forEach(ab=>{
         if(ab.type==='summon'){
+            let rate = Math.max(40, ab.rate - wave*1.0); // summons more often at higher waves
             e.abilityTimers.summon++;
-            if(e.abilityTimers.summon>=ab.rate){
+            if(e.abilityTimers.summon>=rate){
                 e.abilityTimers.summon=0;
                 let minion = spawnEnemy(ab.enemyType, e.x - 10 + Math.random()*20);
                 enemies.push(minion);
                 particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:20,color:'#66ff88',size:5});
+                // At high waves it calls up reinforcements two at a time.
+                if(wave>=25){
+                    let minion2 = spawnEnemy(ab.enemyType, e.x - 10 + Math.random()*20);
+                    enemies.push(minion2);
+                }
             }
         } else if(ab.type==='ranged'){
+            let rate = Math.max(50, ab.rate - wave*0.6); // fires faster at higher waves
+            let dmg = Math.round(ab.dmg + wave*0.35); // hits harder at higher waves
             e.abilityTimers.ranged++;
-            if(e.abilityTimers.ranged>=ab.rate){
+            if(e.abilityTimers.ranged>=rate){
                 e.abilityTimers.ranged=0;
-                castleHP=Math.max(0,castleHP-ab.dmg);
+                castleHP=Math.max(0,castleHP-dmg);
                 let col = ab.effect==='lightning' ? '#aaeeff' : '#ff6600';
                 for(let i=0;i<6;i++){
                     let t=i/6;
@@ -711,37 +835,46 @@ function bossUpdate(e){
                 }
             }
         } else if(ab.type==='dash'){
+            let rate = Math.max(70, ab.rate - wave*0.8); // dashes more often at higher waves
+            let dist = ab.dist + wave*0.5; // dashes further at higher waves
             e.abilityTimers.dash++;
-            if(e.abilityTimers.dash>=ab.rate){
+            if(e.abilityTimers.dash>=rate){
                 e.abilityTimers.dash=0;
-                e.x=Math.max(105,e.x-ab.dist);
-                for(let i=0;i<8;i++) particles.push({x:e.x+ab.dist*Math.random(),y:e.y,vx:0,vy:0,life:15,color:'#8833cc',size:4});
+                e.x=Math.max(105,e.x-dist);
+                for(let i=0;i<8;i++) particles.push({x:e.x+dist*Math.random(),y:e.y,vx:0,vy:0,life:15,color:'#8833cc',size:4});
             }
         } else if(ab.type==='shield'){
+            let onRate = Math.max(90, ab.onRate - wave*0.8); // shields up more often at higher waves
+            let reduction = Math.min(0.88, ab.reduction + wave*0.004); // blocks more damage at higher waves
             if(e.shieldActive){
                 e.abilityTimers.shieldOff++;
                 if(e.abilityTimers.shieldOff>=ab.duration){ e.shieldActive=false; e.abilityTimers.shieldOff=0; }
             } else {
                 e.abilityTimers.shieldOn++;
-                if(e.abilityTimers.shieldOn>=ab.onRate){ e.shieldActive=true; e.shieldReduction=ab.reduction; e.abilityTimers.shieldOn=0; }
+                if(e.abilityTimers.shieldOn>=onRate){ e.shieldActive=true; e.shieldReduction=reduction; e.abilityTimers.shieldOn=0; }
             }
         } else if(ab.type==='lifesteal'){
+            let rate = Math.max(25, ab.rate - wave*0.35); // heals more often at higher waves
+            let amt = ab.amt + wave*0.15; // heals more per tick at higher waves
             e.abilityTimers.lifesteal++;
-            if(e.abilityTimers.lifesteal>=ab.rate){
+            if(e.abilityTimers.lifesteal>=rate){
                 e.abilityTimers.lifesteal=0;
-                if(e.hp<e.maxHp){ e.hp=Math.min(e.maxHp,e.hp+ab.amt); particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:18,color:'#ff0044',size:4}); }
+                if(e.hp<e.maxHp){ e.hp=Math.min(e.maxHp,e.hp+amt); particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:18,color:'#ff0044',size:4}); }
             }
         } else if(ab.type==='freeze_towers'){
+            let rate = Math.max(130, ab.rate - wave*0.7); // freezes more often at higher waves
+            let duration = ab.duration + wave*0.6; // freezes for longer at higher waves
             e.abilityTimers.freeze++;
-            if(e.abilityTimers.freeze>=ab.rate){
+            if(e.abilityTimers.freeze>=rate){
                 e.abilityTimers.freeze=0;
-                towersFrozen=ab.duration;
+                towersFrozen=duration;
                 particles.push({x:e.x,y:e.y,vx:0,vy:-1,life:20,color:'#aaeeff',size:6});
             }
         } else if(ab.type==='enrage'){
+            let speedMult = ab.speedMult + Math.min(0.6, wave*0.01); // enrage hits harder at higher waves
             if(!e.enraged && e.hp/e.maxHp<=ab.threshold){
                 e.enraged=true;
-                e.speed*=ab.speedMult;
+                e.speed*=speedMult;
             }
         }
     });
@@ -749,10 +882,29 @@ function bossUpdate(e){
 
 let spawnQueue=[], spawnTimer=0;
 
+// Which towers can actually hit flying / underground enemies — a fixed,
+// designed split (not randomized per run) so players can learn and plan
+// around it. Each list is roughly half the roster, and the two lists are
+// deliberately complementary: your anti-air squad (ranged/magic attacks
+// that can reach upward) is exactly the squad that can't reach burrowers,
+// and vice versa for your anti-burrower squad (explosive/toxic/freezing/
+// grave-magic effects that work at or below ground level).
+// 'player' is included in FLYING_CAPABLE_TOWERS since manually-fired arrows
+// behave like the Archer Tower's shots.
+const FLYING_CAPABLE_TOWERS = ['archer','ballista','firemage','lightning','player'];
+const UNDERGROUND_CAPABLE_TOWERS = ['cannon','poison','icemage','necromancer'];
+function canTowerHit(sourceId, e){
+    if(e.flying && !FLYING_CAPABLE_TOWERS.includes(sourceId)) return false;
+    if(e.underground && !UNDERGROUND_CAPABLE_TOWERS.includes(sourceId)) return false;
+    return true;
+}
+
 // Per-type wave composition. Goblin/Skeleton counts grow with wave² (explosive
 // swarm growth by design); Knight/Wolf/Siege stay linear (rarer elite units).
 // Variants (scout/armored/dire/shade/leshy) layer extra variety on top, Bloons-style —
 // some resist most towers and are only efficient to kill with a specific counter.
+// skyraider/wyvern fly (see FLYING_CAPABLE_TOWERS); stoneburrower/graveworm
+// travel underground (see UNDERGROUND_CAPABLE_TOWERS).
 const ENEMY_SPAWN_TABLE = [
     { type:'goblin',          unlock:1,  count:(w)=> 2 + w*w },
     { type:'goblin_scout',    unlock:2,  count:(w)=> Math.floor(w/2) },
@@ -761,13 +913,17 @@ const ENEMY_SPAWN_TABLE = [
     { type:'goblin_armored',  unlock:5,  count:(w)=> Math.floor(w/2) },
     { type:'brambletreant',   unlock:6,  count:(w)=> Math.max(1, Math.floor(w/7)) },
     { type:'knight',          unlock:6,  count:(w)=> w },
+    { type:'skyraider',       unlock:7,  count:(w)=> Math.max(1, Math.floor(w/6)) },
     { type:'leshy',           unlock:8,  count:(w)=> Math.max(1, Math.floor(w/6)) },
     { type:'shade',           unlock:9,  count:(w)=> Math.floor(w/3) },
     { type:'wolf',            unlock:9,  count:(w)=> w*2 },
+    { type:'stoneburrower',   unlock:10, count:(w)=> Math.max(1, Math.floor(w/7)) },
     { type:'embersalamander', unlock:10, count:(w)=> Math.max(1, Math.floor(w/7)) },
     { type:'wolf_dire',       unlock:11, count:(w)=> Math.floor(w/3) },
     { type:'siege',           unlock:12, count:(w)=> Math.round(w/2) },
     { type:'irongolem',       unlock:13, count:(w)=> Math.max(1, Math.floor(w/8)) },
+    { type:'wyvern',          unlock:14, count:(w)=> Math.max(1, Math.floor(w/8)) },
+    { type:'graveworm',       unlock:17, count:(w)=> Math.max(1, Math.floor(w/8)) },
     { type:'bombbeetle',      unlock:16, count:(w)=> Math.max(1, Math.floor(w/8)) },
     { type:'golemsentinel',   unlock:19, count:(w)=> Math.max(1, Math.floor(w/8)) },
     { type:'rottedrevenant',  unlock:22, count:(w)=> Math.max(1, Math.floor(w/8)) },
@@ -779,12 +935,33 @@ const ENEMY_SPAWN_TABLE = [
 // the alive count drops back below the cap, then resumes automatically.
 const MAX_ALIVE_ENEMIES = 150;
 
+// Sum of every permanent Kingdom upgrade's level, across all 16 upgrades —
+// used to make more heavily-invested players face a faster-paced game.
+function totalKingdomUpgradesPurchased(){
+    return KINGDOM_UPGRADES.reduce((sum,u)=> sum + kingdomLevel(u.id), 0);
+}
+
+// Spawn interval starts at 50 frames and drops by (2 + total Kingdom
+// upgrades purchased) for every wave reached — e.g. wave 3 with 2 upgrades
+// purchased is 50 - 3*(2+2) = 38 frames. Once that would go below 2 frames,
+// the interval locks at 2 and the leftover "speed" instead spawns extra
+// enemies per tick, so the pace keeps escalating instead of hitting a wall.
+// Night weather halves whatever interval this produces on top of that.
+function getSpawnParams(){
+    let totalUpgrades = totalKingdomUpgradesPurchased();
+    let raw = 50 - wave*(2+totalUpgrades);
+    let interval = Math.max(2, raw);
+    let batchSize = raw<2 ? 1+Math.floor(2-raw) : 1;
+    if(activeWeather==='night') interval = Math.max(1, Math.floor(interval/2));
+    return {interval, batchSize};
+}
+
 function startWave() {
     wave++;
     if(runPowerupBonuses.stageclear>0) addGold(runPowerupBonuses.stageclear);
-    addGold(goldMines*5);
+    if(goldMines) addGold(Math.round(5*getCardEffectMult('goldmine')));
     if(wallHP>0) castleHP=Math.min(castleHP+wallHP, maxHP);
-    if(priestHeal) castleHP=Math.min(castleHP+5, maxHP);
+    if(priestHeal) castleHP=Math.min(castleHP+Math.round(5*getCardEffectMult('priest')), maxHP);
     spawnQueue=[];
     waveGoldMult=1; waveDmgMult=1; waveContactDmgMult=1;
     activeAffix=null;
@@ -809,8 +986,9 @@ function startWave() {
 
     let isPreBoss = (wave+1)%5===0;
     if(isPreBoss) activeAffix = AFFIX_DEFS[Math.floor(Math.random()*AFFIX_DEFS.length)].id;
+    if(activeAffix==='cindermarch') waveContactDmgMult *= 1.5; // fire-touched enemies hit harder up close
 
-    let doubleEnemies = forceNextWaveDoubleEnemies;
+    let doubleEnemies = forceNextWaveDoubleEnemies || runDoubleEnemies;
     forceNextWaveDoubleEnemies=false;
     buildWaveComposition(doubleEnemies);
 
@@ -837,7 +1015,41 @@ function buildWaveComposition(doubleEnemies){
     else if(activeAffix==='wolves') spawnQueue = Array(total).fill('wolf');
     else if(activeAffix==='guard') spawnQueue = Array(total).fill('knight');
     else if(activeAffix==='caravan') spawnQueue = Array(Math.max(6,total)).fill('wagon');
+    else if(activeAffix==='ironlegion'){
+        // Tanky, resistance-heavy specialists — punishes one-tower spam.
+        let types=['goblin_armored','irongolem','golemsentinel','bombbeetle'].filter(t=> wave>=ENEMY_SPAWN_TABLE.find(s=>s.type===t).unlock);
+        if(types.length===0) types=['goblin'];
+        let perType = Math.max(2, Math.floor(total/(types.length*4)));
+        spawnQueue=[];
+        types.forEach(t=>{ for(let i=0;i<perType;i++) spawnQueue.push(t); });
+    }
+    else if(activeAffix==='skyswarm'){
+        // Fast, fragile, and overwhelming in number — a splash-damage check.
+        let types=['goblin_scout','wisphawk','wolf'].filter(t=> wave>=ENEMY_SPAWN_TABLE.find(s=>s.type===t).unlock);
+        if(types.length===0) types=['goblin'];
+        let perType = Math.max(6, Math.floor(total/types.length));
+        spawnQueue=[];
+        types.forEach(t=>{ for(let i=0;i<perType;i++) spawnQueue.push(t); });
+    }
+    else if(activeAffix==='cindermarch'){
+        // Fire-touched enemies; castle contact damage is also boosted for this wave — see startWave().
+        let types=['embersalamander','bombbeetle'].filter(t=> wave>=ENEMY_SPAWN_TABLE.find(s=>s.type===t).unlock);
+        if(types.length===0) types=['goblin'];
+        let perType = Math.max(4, Math.floor(total/types.length));
+        spawnQueue=[];
+        types.forEach(t=>{ for(let i=0;i<perType;i++) spawnQueue.push(t); });
+    }
+    else if(activeAffix==='mixedvanguard'){
+        // One of every "onlyVulnerableTo" specialist — no single tower type clears this alone.
+        let types=['leshy','wisphawk','brambletreant','embersalamander','irongolem','bombbeetle','golemsentinel','rottedrevenant'].filter(t=> wave>=ENEMY_SPAWN_TABLE.find(s=>s.type===t).unlock);
+        if(types.length===0) types=['goblin'];
+        let perType = Math.max(3, Math.floor(total/types.length));
+        spawnQueue=[];
+        types.forEach(t=>{ for(let i=0;i<perType;i++) spawnQueue.push(t); });
+    }
     else {
+        // 'vanguard' (Swift Vanguard) also falls through to here — its enemies
+        // are the normal wave composition, just faster (see the movement loop).
         spawnQueue=[];
         Object.entries(baseCounts).forEach(([t,n])=>{ for(let i=0;i<n;i++) spawnQueue.push(t); });
     }
@@ -876,7 +1088,10 @@ function showBoss(){
         for(let i=0;i<bossCount;i++) spawnQueue.push('boss');
         def.abilities.forEach(ab=>{
             if(ab.type==='bodyguard'){
-                for(let i=0;i<ab.count;i++) spawnQueue.push(ab.enemyType);
+                // More escorts at higher waves, and each extra simultaneous
+                // boss brings its own full retinue rather than sharing one.
+                let count = (ab.count + Math.floor(wave/8)) * bossCount;
+                for(let i=0;i<count;i++) spawnQueue.push(ab.enemyType);
             }
         });
         for(let i=0;i<wave;i++) spawnQueue.push('goblin');
@@ -888,8 +1103,8 @@ function startBetweenWave(){
     state='between';
     if(pendingFreeTowerAfterBoss){
         pendingFreeTowerAfterBoss=false;
-        let towerCards = allCards.filter(c=>c.type==='tower');
-        applyCard(towerCards[Math.floor(Math.random()*towerCards.length)]);
+        let towerCards = getUnlockedCards().filter(c=>c.type==='tower');
+        if(towerCards.length) applyCard(towerCards[Math.floor(Math.random()*towerCards.length)]);
     }
     let nextWave = wave+1;
     let nextIsBoss = nextWave%5===0;
@@ -961,6 +1176,11 @@ function askBetweenQuestion(){
                 totalBetweenWaveCorrect++;
                 recordCorrectAnswer();
                 if(totalBetweenWaveCorrect%4===0) grantEducationMilestoneReward();
+                if(runCorrectAnswersGiveGold){
+                    // Midas Run: no more card rewards this run, so correct
+                    // answers pay out directly in gold instead.
+                    addGold(10 + Math.floor(wave*0.5));
+                }
             }
             else { btn.classList.add('wrong'); modalRoot.querySelectorAll('.choice-btn').forEach(b=>{ if(b.dataset.correct==='true') b.classList.add('correct'); }); }
             modalRoot.querySelectorAll('.choice-btn').forEach(b=>b.onclick=null);
@@ -982,35 +1202,68 @@ const ENEMY_SINGLE_COUNTER = {
     golemsentinel:   { tower:'lightning', name:'Golem Sentinel ⚙️' },
     rottedrevenant:  { tower:'poison',    name:'Rotted Revenant 🧟' },
 };
+// Flying/underground enemies aren't locked to one single counter — about
+// half the tower roster can hit each — so their warning lists every eligible
+// tower instead of naming just one.
+const ENEMY_TRAIT_INFO = {
+    skyraider:     { trait:'flying',      name:'Sky Raider 🦅' },
+    wyvern:        { trait:'flying',      name:'Wyvern 🐲' },
+    stoneburrower: { trait:'underground', name:'Stone Burrower 🪨' },
+    graveworm:     { trait:'underground', name:'Grave Worm 🐛' },
+};
 
 function showCardSelect(){
     if(skipNextCardReward){ skipNextCardReward=false; startWave(); return; }
+    if(runNoCardRewards){ startWave(); return; } // Midas Run: no card rewards for the rest of this run
     let n=Math.max(1,betweenWaveCorrect);
     if(kingdomAcademyLevel>0 && Math.random()<0.05*kingdomAcademyLevel) n++;
     let options=pickCards(n);
+    let justUnlockedId = null;
+    if(pendingCardUnlocks.length){
+        // Present the newly-unlocked card immediately, bypassing its normal
+        // rarity weighting entirely, so the player gets to try it right away.
+        justUnlockedId = pendingCardUnlocks.shift();
+        let forcedCard = allCards.find(c=>c.id===justUnlockedId);
+        if(forcedCard){
+            let dupIdx = options.findIndex(o=>o.id===forcedCard.id);
+            if(dupIdx>=0) options.splice(dupIdx,1);
+            options[0] = forcedCard;
+        }
+    }
     let html=`<div class="modal-overlay"><div class="modal-box"><h2>${betweenWaveCorrect}/4 Correct! Choose one:</h2><div style="margin-top:16px">`;
     options.forEach((c,i)=>{
         let existing = (c.type==='tower') ? towers.find(t=>t.id===c.id) : null;
         let extra = existing ? `<div style="font-size:10px;color:#4caf50;margin-top:2px">⬆ Upgrade Lv${existing.level+1}</div>` : '';
-        html+=`<button class="card-btn" data-idx="${i}"><div style="font-size:20px">${c.name}</div><div style="font-size:11px;margin-top:4px;color:#aaa">${c.desc}</div>${extra}</button>`;
+        let newBadge = (justUnlockedId===c.id) ? `<div style="font-size:10px;color:#ffcc44;margin-top:2px">🆕 Newly Unlocked!</div>` : '';
+        html+=`<button class="card-btn" data-idx="${i}"><div style="font-size:20px">${c.name}</div><div style="font-size:11px;margin-top:4px;color:#aaa">${c.desc}</div>${extra}${newBadge}</button>`;
     });
     html+=`</div>`;
 
-    // Countdown preview: only for enemies with a single hard-counter tower, so
-    // the player knows to have that tower built before it arrives.
+    // Countdown preview: enemies with a single hard-counter tower, or with a
+    // flying/underground trait that only half the roster can hit — so the
+    // player knows what to have built before either kind arrives.
     let nextWave = wave+1;
-    let upcoming = ENEMY_SPAWN_TABLE.filter(spec => spec.unlock>nextWave && spec.unlock-nextWave<=5 && ENEMY_SINGLE_COUNTER[spec.type])
+    let upcoming = ENEMY_SPAWN_TABLE.filter(spec => spec.unlock>nextWave && spec.unlock-nextWave<=5 && (ENEMY_SINGLE_COUNTER[spec.type] || ENEMY_TRAIT_INFO[spec.type]))
         .sort((a,b)=>a.unlock-b.unlock);
     if(upcoming.length){
         html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #443;font-size:11px;color:#aaa">`;
         upcoming.forEach(spec=>{
             let waves = spec.unlock-nextWave;
-            let counter = ENEMY_SINGLE_COUNTER[spec.type];
-            let towerCard = allCards.find(c=>c.id===counter.tower);
-            let towerName = towerCard ? towerCard.name : counter.tower;
-            let owned = towers.some(t=>t.id===counter.tower);
-            let unlockNote = owned ? '' : ` — ${towerName} isn't unlocked yet!`;
-            html += `<div>⚠️ ${counter.name} incoming in ${waves} wave${waves===1?'':'s'} — only ${towerName} damages it effectively${unlockNote}</div>`;
+            if(ENEMY_SINGLE_COUNTER[spec.type]){
+                let counter = ENEMY_SINGLE_COUNTER[spec.type];
+                let towerCard = allCards.find(c=>c.id===counter.tower);
+                let towerName = towerCard ? towerCard.name : counter.tower;
+                let owned = towers.some(t=>t.id===counter.tower);
+                let unlockNote = owned ? '' : ` — ${towerName} isn't unlocked yet!`;
+                html += `<div>⚠️ ${counter.name} incoming in ${waves} wave${waves===1?'':'s'} — only ${towerName} damages it effectively${unlockNote}</div>`;
+            } else {
+                let info = ENEMY_TRAIT_INFO[spec.type];
+                let capableIds = info.trait==='flying' ? FLYING_CAPABLE_TOWERS : UNDERGROUND_CAPABLE_TOWERS;
+                let ownedCapable = towers.filter(t=>capableIds.includes(t.id));
+                let capableNames = capableIds.filter(id=>id!=='player').map(id=>{ let c=allCards.find(x=>x.id===id); return c?c.name:id; }).join(', ');
+                let readiness = ownedCapable.length ? '' : ` — none of your towers can hit it yet! Needs one of: ${capableNames}`;
+                html += `<div>⚠️ ${info.name} incoming in ${waves} wave${waves===1?'':'s'} — ${info.trait==='flying'?'flies':'burrows underground'}, only half your towers can hit it${readiness}</div>`;
+            }
         });
         html += `</div>`;
     }
@@ -1048,7 +1301,15 @@ function showCardSelect(){
     modalRoot.innerHTML=html;
     modalRoot.querySelectorAll('.card-btn').forEach(btn=>{
         btn.onclick=()=>{
-            applyCard(options[parseInt(btn.dataset.idx)]);
+            let chosen = options[parseInt(btn.dataset.idx)];
+            applyCard(chosen);
+            // Twin Fate's promise: if it was active, whatever the player
+            // just chose (as long as it wasn't Twin Fate itself) gets its
+            // pick effect applied once more immediately.
+            if(pendingDoubleNextCard && chosen.id!=='twinfate'){
+                pendingDoubleNextCard = false;
+                applyCard(chosen);
+            }
             modalRoot.innerHTML='';
             startWave();
         };
@@ -1089,22 +1350,22 @@ function showQuestion(){
 // discover what each upgrade actually does by noticing their next run feels
 // different, not by reading a tooltip.
 const KINGDOM_FLAVOR = {
-    soldiers:'Hardened veterans man the walls.',
-    archives:'Ancient tomes of forgotten magic.',
-    blacksmith:'The forge never stops ringing.',
-    siegeengineers:'Masters of destructive engineering.',
-    traininggrounds:'A place to drill new recruits. (one-time)',
-    treasury:'Coffers overflow with royal wealth.',
-    marketplace:'Merchants haggle in your favor.',
-    supplydepot:'Crates of arrows, ready to go.',
-    warehouse:'More room to stockpile supplies.',
-    walls:'Stone laid thick and true.',
-    healers:'Menders tend the wounded after battle.',
-    watchtowers:'Keen eyes scan the horizon.',
-    studyhall:'Scholars reward diligent study.',
-    apprenticeships:'Young craftsmen hone their trade.',
-    library:'Knowledge, carefully rationed.',
-    academy:'The finest minds in the realm.',
+    soldiers:'Increases the damage of Archer and Axeman towers.',
+    archives:'Increases how long freeze and burn effects last.',
+    blacksmith:'Increases the attack speed of every tower.',
+    siegeengineers:'Increases splash damage radius for Cannon and Alchemist towers.',
+    traininggrounds:'Start every run with a free Archer Tower already built. (one-time)',
+    treasury:'Increases all gold earned during a run.',
+    marketplace:'Reduces the crown cost of every permanent upgrade below.',
+    supplydepot:'Increases your starting ammo at the beginning of a run.',
+    warehouse:'Increases your maximum ammo capacity.',
+    walls:'Increases your castle\'s maximum HP.',
+    healers:'Heals a portion of your castle\'s HP after every boss wave. Also strengthens the Necromancer tower, raising more skeletons.',
+    watchtowers:'Reveals more information about upcoming waves.',
+    studyhall:'Rewards bonus gold for correct answers between waves.',
+    apprenticeships:'Correct answers randomly grant a small permanent boost to one of your towers.',
+    library:'Gives correct answers a chance to reward double ammo.',
+    academy:'Gives you a chance to be offered an extra card to choose from after a wave.',
 };
 
 let kingdomActiveTab = 'permanent';
@@ -1155,6 +1416,30 @@ function renderPowerupsTab(){
     return html;
 }
 
+const CARD_GROUP_LABELS = { towers:'🏹 Towers', economy:'💰 Economy', defence:'🛡️ Defence', buff:'📯 Buffs', rare:'⭐ Rare', legendary:'👑 Legendary' };
+const CARD_GROUP_ORDER = ['towers','economy','defence','buff','rare','legendary'];
+function renderCardsTab(){
+    let c = kingdomSave.totalCorrectAnswers;
+    let html = `<p style="font-size:12px;color:#8cf;margin:10px 0">Cards unlock permanently as you answer questions correctly, in any run (${c} lifetime correct so far). A locked card can never be offered in a run's card selection — once unlocked, it can be offered in every future run, including this one.</p>`;
+    CARD_GROUP_ORDER.forEach(g=>{
+        let inGroup = allCards.filter(card=>card.group===g);
+        if(!inGroup.length) return;
+        html += `<div style="margin-top:14px;font-size:13px;color:#00d4ff;border-bottom:1px solid #445;padding-bottom:4px">${CARD_GROUP_LABELS[g]||g}</div>`;
+        inGroup.forEach(card=>{
+            let at = card.unlockAt||0;
+            let unlocked = c>=at;
+            html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2a3a;gap:10px">
+                <div>
+                    <div style="font-size:14px">${unlocked?card.name:'🔒 ???'}</div>
+                    <div style="font-size:10px;color:#888">${unlocked?card.desc:(at===0?'Starter card':`Unlocks at ${at} lifetime correct answers (${c}/${at})`)}</div>
+                </div>
+                <div style="font-size:11px;color:${unlocked?'#4caf50':'#666'};white-space:nowrap">${unlocked?'✓ Unlocked':'🔒 Locked'}</div>
+            </div>`;
+        });
+    });
+    return html;
+}
+
 function renderKingdomHTML(){
     let html = `<div class="modal-overlay"><div class="modal-box" style="max-width:540px;max-height:85vh;overflow-y:auto;text-align:left">
         <h2 style="text-align:center">🏰 The Kingdom</h2>
@@ -1162,11 +1447,12 @@ function renderKingdomHTML(){
     if(!kingdomStorageOk){
         html += `<p style="text-align:center;color:#e74c3c;font-size:11px">⚠️ This browser is blocking save data — progress won't persist after you close this tab.</p>`;
     }
-    html += `<div style="display:flex;gap:8px;margin-top:12px">
+    html += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <button class="choice-btn kingdom-tab-btn" data-tab="permanent" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='permanent'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Permanent Upgrades</button>
         <button class="choice-btn kingdom-tab-btn" data-tab="powerups" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='powerups'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Single-Run Powerups</button>
+        <button class="choice-btn kingdom-tab-btn" data-tab="cards" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='cards'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Unlocked Cards</button>
     </div>`;
-    html += kingdomActiveTab==='permanent' ? renderPermanentTab() : renderPowerupsTab();
+    html += kingdomActiveTab==='permanent' ? renderPermanentTab() : (kingdomActiveTab==='powerups' ? renderPowerupsTab() : renderCardsTab());
     html += `<button class="choice-btn" id="kingdom-close-btn" style="margin-top:16px;text-align:center">Return</button></div></div>`;
     return html;
 }
@@ -1207,7 +1493,7 @@ function showStart(){
         <h2>🏰 CASTLE DEFENCE</h2>
         <p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p>
         <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:12px;margin-bottom:16px">
-            <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code (ask your teacher — leave blank for general knowledge)</label>
+            <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code — required to play (ask your teacher)</label>
             <input id="bank-code-input" type="text" placeholder="Class Code" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
             <div id="bank-status" style="font-size:12px;margin-top:6px;min-height:16px;color:#aaa"></div>
         </div>
@@ -1233,9 +1519,11 @@ function showStart(){
             startBtn.disabled = false;
             startBtn.textContent = '⚔️ START GAME';
             status.style.color = '#e74c3c';
-            status.textContent = result.error==='code-not-found'
-                ? "⚠️ Code not recognised — check with your teacher, or leave blank for general knowledge."
-                : "⚠️ Couldn't load question banks (try hosting this file on a local server). Leaving blank uses general knowledge.";
+            status.textContent = result.error==='code-required'
+                ? "⚠️ A question bank code is required to play — ask your teacher for yours."
+                : result.error==='code-not-found'
+                ? "⚠️ Code not recognised — check with your teacher."
+                : "⚠️ Couldn't load that question bank (try hosting this file on a local server).";
         }
     };
     startBtn.onclick = tryStart;
@@ -1243,8 +1531,9 @@ function showStart(){
     document.getElementById('kingdom-btn').onclick = ()=> showKingdom(()=>showStart());
 }
 
-let gameOverCrownsAwarded = false, lastCrownsEarned = 0;
-function showGameOver(){
+let gameOverCrownsAwarded = false, lastCrownsEarned = 0, lastRunWasVoluntary = false;
+function showGameOver(voluntary){
+    if(voluntary!==undefined) lastRunWasVoluntary = voluntary; // remembered so returning from The Kingdom keeps the right framing
     state='gameover';
     if(!gameOverCrownsAwarded){
         lastCrownsEarned = Math.floor(wave*3 + kills*0.2 + gold*0.05);
@@ -1258,7 +1547,9 @@ function showGameOver(){
             ${pendingUnlockNotifications.map(n=>`<div style="color:#ffcc44;font-size:13px">🎉 ${n}</div>`).join('')}
         </div>`;
     }
-    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>💀 GAME OVER</h2><p style="margin:16px 0">You survived ${wave} waves!</p><p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><p style="color:#ffcc44;font-size:16px;margin:12px 0">👑 +${lastCrownsEarned} Crowns earned (Total: ${kingdomSave.crowns})</p>${unlockHtml}${!kingdomStorageOk?'<p style="color:#e74c3c;font-size:11px">⚠️ Save data is blocked in this browser — Crowns won\'t persist after this tab closes.</p>':''}<button class="choice-btn" style="text-align:center" id="kingdom-btn">🏰 Visit The Kingdom</button><button class="choice-btn" style="text-align:center;margin-top:8px" id="restart-btn">🔄 Play Again</button></div></div>`;
+    let title = lastRunWasVoluntary ? '🏆 Run Complete!' : '💀 GAME OVER';
+    let subtitle = lastRunWasVoluntary ? `You banked your progress after ${wave} waves!` : `You survived ${wave} waves!`;
+    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>${title}</h2><p style="margin:16px 0">${subtitle}</p><p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><p style="color:#ffcc44;font-size:16px;margin:12px 0">👑 +${lastCrownsEarned} Crowns earned (Total: ${kingdomSave.crowns})</p>${unlockHtml}${!kingdomStorageOk?'<p style="color:#e74c3c;font-size:11px">⚠️ Save data is blocked in this browser — Crowns won\'t persist after this tab closes.</p>':''}<button class="choice-btn" style="text-align:center" id="kingdom-btn">🏰 Visit The Kingdom</button><button class="choice-btn" style="text-align:center;margin-top:8px" id="restart-btn">🔄 Play Again</button></div></div>`;
     document.getElementById('restart-btn').onclick=()=>{ location.reload(); };
     document.getElementById('kingdom-btn').onclick=()=> showKingdom(()=>showGameOver());
 }
@@ -1274,8 +1565,14 @@ canvas.addEventListener('click', (e)=>{
     let angle=Math.atan2(ty-sy,tx-sx);
     let spd=5;
     if(hasElite){
-        for(let s=-1;s<=1;s++){
-            let a=angle+s*0.15;
+        // Base is a 3-way spread (level 1). Each repeat pick adds 2 more
+        // arrows to the spread, capped at 9, spacing them across a fixed cone.
+        let lvl = getCardLevel('elite') || 1;
+        let shots = Math.min(9, 1+2*lvl);
+        let coneHalfWidth = 0.35;
+        for(let s=0;s<shots;s++){
+            let t = shots===1 ? 0 : (s/(shots-1)-0.5)*2; // -1..1
+            let a=angle+t*coneHalfWidth;
             projectiles.push({x:sx,y:sy,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,dmg:10*globalDmgMult,type:'arrow',life:80,sourceTowerId:'player'});
         }
     } else {
@@ -1290,6 +1587,33 @@ document.getElementById('target-btn').onclick=()=>{
     towerTargetMode = (towerTargetMode==='nearest') ? 'strongest' : 'nearest';
     document.getElementById('target-btn').textContent = towerTargetMode==='nearest' ? '🎯 Targeting: Nearest' : '🎯 Targeting: Strongest';
 };
+document.getElementById('cashout-btn').onclick=()=> showCashOutConfirm();
+
+// Offered once gold is sitting at its cap — further gold income is being
+// clamped and wasted, so the player can choose to bank their run's Crowns
+// right now instead of continuing to grind with no economic upside.
+function showCashOutConfirm(){
+    if(state!=='playing') return;
+    state='cashout-confirm';
+    let projected = Math.floor(wave*3 + kills*0.2 + gold*0.05);
+    modalRoot.innerHTML = `<div class="modal-overlay"><div class="modal-box" style="text-align:center">
+        <h2>💰 Gold Maxed Out</h2>
+        <p style="margin:14px 0;color:#ccc">Your gold income is capped at ${maxGold} — any more you earn is being wasted. You can end this run right now and bank what you've got as Crowns instead.</p>
+        <p style="color:#ffcc44;font-size:15px;margin:10px 0">👑 ~${projected} Crowns if you cash out now</p>
+        <p style="font-size:11px;color:#888;margin-bottom:12px">Waiting costs nothing but potential — surviving further waves and getting more kills would still add to this total. This is purely your call.</p>
+        <button class="choice-btn" style="text-align:center;background:rgba(255,204,68,0.15);border-color:#ffcc44" id="cashout-confirm-btn">🏰 Cash Out & Bank Crowns</button>
+        <button class="choice-btn" style="text-align:center;margin-top:8px" id="cashout-cancel-btn">⚔️ Keep Playing</button>
+    </div></div>`;
+    document.getElementById('cashout-confirm-btn').onclick = ()=>{
+        modalRoot.innerHTML='';
+        showGameOver(true);
+    };
+    document.getElementById('cashout-cancel-btn').onclick = ()=>{
+        modalRoot.innerHTML='';
+        state='playing';
+        updateHUD();
+    };
+}
 
 function updateHUD(){
     document.getElementById('hud-wave').textContent='⭐ Wave: '+wave;
@@ -1299,6 +1623,10 @@ function updateHUD(){
     document.getElementById('hud-bank').textContent='📚 '+currentBankName;
     let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
     document.getElementById('hud-weather').textContent = w ? w.name : '';
+    // Gold income is wasted once you're capped — surface the option to bank
+    // what you've got into Crowns now instead of continuing to overflow it.
+    let cashoutBtn = document.getElementById('cashout-btn');
+    if(cashoutBtn) cashoutBtn.style.display = (gold>=maxGold && state==='playing') ? 'inline-block' : 'none';
 }
 
 function drawBackground(ox, oy, s){
@@ -1651,6 +1979,25 @@ function drawCastle(ox, oy, s){
     }
 }
 
+// A small bony melee minion raised by the Necromancer tower — bobs in place
+// while walking, fades out as its remaining lifespan runs low.
+function drawSkeletonAlly(sk, ox, oy, s){
+    let x=(ox+sk.x)*s, y=(oy+sk.y)*s;
+    let bob = Math.sin((animFrame+sk.bobSeed*10)*0.2)*1.5;
+    ctx.globalAlpha = sk.life<60 ? Math.max(0.15, sk.life/60) : 1;
+    ctx.fillStyle='#e8e4d8';
+    ctx.fillRect(x-2, y-6+bob, 4, 6); // torso
+    ctx.fillStyle='#d8d4c4';
+    ctx.beginPath(); ctx.arc(x, y-8+bob, 2.4, 0, Math.PI*2); ctx.fill(); // skull
+    ctx.fillStyle='#222';
+    ctx.fillRect(x-1, y-8.5+bob, 0.8, 0.8); // eye socket
+    ctx.strokeStyle='#c8c4b4';
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x-3,y-3+bob); ctx.lineTo(x-4,y+1+bob); ctx.stroke(); // arm
+    ctx.beginPath(); ctx.moveTo(x+3,y-3+bob); ctx.lineTo(x+4,y+1+bob); ctx.stroke(); // arm
+    ctx.globalAlpha = 1;
+}
+
 function drawTower(t, tx, ty, s){
     let lvlIndicator = t.level > 1;
     // Stretch the tower 20% taller, anchored at its base so it grows upward
@@ -1821,6 +2168,25 @@ function drawTower(t, tx, ty, s){
         ctx.globalAlpha=0.6;
         ctx.beginPath(); ctx.arc((tx+9)*s,(ty-13+bubble)*s, 2.5*s, 0, Math.PI*2); ctx.fill();
         ctx.globalAlpha=1;
+    } else if(t.id==='necromancer'){
+        ctx.fillStyle='#151520';
+        ctx.fillRect((tx-1)*s,(ty-1)*s, 20*s, 26*s); // outline
+        ctx.fillStyle='#2a2a3a';
+        ctx.fillRect(tx*s,ty*s, 18*s, 24*s);
+        ctx.fillStyle='rgba(255,255,255,0.06)';
+        ctx.fillRect(tx*s,ty*s, 4*s, 24*s); // highlight
+        ctx.fillStyle='#1a1a28';
+        for(let r=0;r<4;r++) ctx.fillRect(tx*s,(ty+r*6)*s, 18*s, 1*s); // stone lines
+        ctx.fillStyle='#0a0a12';
+        ctx.fillRect((tx+3)*s,(ty-9)*s, 12*s, 11*s); // spire
+        ctx.fillStyle='#e8e4d8';
+        ctx.beginPath(); ctx.arc((tx+9)*s,(ty-11)*s, 3*s, 0, Math.PI*2); ctx.fill(); // skull finial
+        ctx.fillStyle='#111';
+        ctx.fillRect((tx+7.5)*s,(ty-11.5)*s, 1*s, 1*s);
+        ctx.fillRect((tx+9.5)*s,(ty-11.5)*s, 1*s, 1*s);
+        let necroGlow=0.4+Math.sin(animFrame*0.08)*0.3;
+        ctx.fillStyle=`rgba(120,255,140,${necroGlow})`;
+        ctx.beginPath(); ctx.arc((tx+9)*s,(ty+8)*s, 2.5*s, 0, Math.PI*2); ctx.fill(); // spectral orb
     } else {
         ctx.fillStyle=t.color||'#888';
         ctx.fillRect(tx*s,(ty-6)*s, 18*s, 28*s);
@@ -2304,6 +2670,67 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillStyle=frozen?'#88ccff':'#2a3a1a';
         ctx.fillRect(ex+2, ey+bob+13, 3*s, 4*s);
         ctx.fillRect(ex+6, ey+bob+13, 3*s, 4*s);
+    } else if(e.type==='skyraider'){
+        // Flying enemies render offset upward with a small ground shadow so
+        // their airborne status reads clearly, even though collision/contact
+        // logic still treats them at the same x position as everything else.
+        let fy = ey-16+Math.sin(animFrame*0.3+e.x*0.2)*3; // faster wingbeat bob
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+5, ey+13, 4*s, 1.5*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle=frozen?'#88ccff':'#5a4a7a';
+        ctx.fillRect(ex+2, fy, 6*s, 6*s); // body
+        let wingSpread = 5+Math.sin(animFrame*0.5+e.x*0.2)*4;
+        ctx.fillStyle=frozen?'#aaddff':'#8866cc';
+        ctx.fillRect(ex+2-wingSpread, fy+1, wingSpread*s, 3*s); // left wing
+        ctx.fillRect(ex+8, fy+1, wingSpread*s, 3*s); // right wing
+        ctx.fillStyle='#ffcc44';
+        ctx.fillRect(ex+3, fy+1, 1.3*s, 1.3*s); // eye
+        ctx.fillStyle='#3a2a5a';
+        ctx.fillRect(ex+7, fy+2, 2*s, 1*s); // beak
+    } else if(e.type==='wyvern'){
+        let fy = ey-20+Math.sin(animFrame*0.12+e.x*0.15)*2; // slow, heavy wingbeat
+        ctx.fillStyle='rgba(0,0,0,0.3)';
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+13, 7*s, 2*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle=frozen?'#6bb0e0':'#4a1a1a';
+        ctx.fillRect(ex+1, fy, 12*s, 9*s); // body outline
+        ctx.fillStyle=frozen?'#88ccff':'#7a2a2a';
+        ctx.fillRect(ex+2, fy+1, 10*s, 7*s);
+        let wingSpread = 9+Math.sin(animFrame*0.15+e.x*0.15)*5;
+        ctx.fillStyle=frozen?'#aaddff':'#5a1515';
+        ctx.fillRect(ex+2-wingSpread, fy-1, wingSpread*s, 5*s); // left wing
+        ctx.fillRect(ex+11, fy-1, wingSpread*s, 5*s); // right wing
+        ctx.fillStyle='#ffaa00';
+        ctx.fillRect(ex+9, fy+2, 1.6*s, 1.6*s); // eye
+        ctx.fillStyle='#5a1515';
+        ctx.fillRect(ex+11, fy+4, 3*s, 1.3*s); // tail spike
+    } else if(e.type==='stoneburrower'){
+        // Underground enemies render mostly hidden beneath a dirt mound, only
+        // a rocky hump visible above the surface, selling the "burrowing" read.
+        ctx.fillStyle='#4a3a28';
+        ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+11, 8*s, 3.5*s, 0, 0, Math.PI*2); ctx.fill(); // dirt mound
+        ctx.fillStyle=frozen?'#6bb0e0':'#6a6a5a';
+        ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+6, 7*s, 6*s, 0, 0, Math.PI); ctx.fill(); // rocky hump poking out
+        ctx.fillStyle=frozen?'#88ccff':'#8a8a7a';
+        ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+5, 5*s, 4*s, 0, 0, Math.PI); ctx.fill();
+        ctx.fillStyle='#ffcc44';
+        ctx.fillRect(ex+3, ey+bob+3, 1.3*s, 1.3*s); // eye
+        ctx.fillRect(ex+7, ey+bob+3, 1.3*s, 1.3*s);
+        ctx.fillStyle='#3a3a2a';
+        for(let i=0;i<3;i++) ctx.fillRect(ex+1+i*3.5, ey+bob+10, 1.3*s, 1.3*s); // dirt clods kicked up
+    } else if(e.type==='graveworm'){
+        ctx.fillStyle='#2a1a2a';
+        ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+12, 7*s, 3*s, 0, 0, Math.PI*2); ctx.fill(); // dirt mound
+        let wriggle = Math.sin(animFrame*0.2+e.x*0.2)*2;
+        ctx.fillStyle=frozen?'#6bb0e0':'#5a2a5a';
+        ctx.fillRect(ex+2+wriggle, ey+bob+2, 6*s, 8*s); // worm segment outline
+        ctx.fillStyle=frozen?'#88ccff':'#7a3a7a';
+        ctx.fillRect(ex+3+wriggle, ey+bob+3, 4*s, 6*s);
+        ctx.fillStyle='#aa5aaa';
+        for(let i=0;i<2;i++) ctx.fillRect(ex+3+wriggle, ey+bob+4+i*3, 4*s, 1*s); // segment rings
+        ctx.fillStyle='#ccff44';
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.2)*0.3;
+        ctx.fillRect(ex+3+wriggle, ey+bob+3, 1.3*s, 1.3*s); // toxic glow eye
+        ctx.globalAlpha=1;
     } else if(e.type==='boss'){
         drawBossSprite(e, ex, ey, s, bob, frozen);
     }
@@ -2551,6 +2978,12 @@ function drawBossAccessory(def, e, ex, ey, s, bob, pulse){
 
 function drawProjectile(p, ox, oy, s){
     let px2=(ox+p.x)*s, py2=(oy+p.y)*s;
+    if(p.crit){
+        ctx.fillStyle='#ffd700';
+        ctx.globalAlpha=0.6;
+        ctx.fillRect(px2-2*s,py2-2*s, 11*s, 6*s);
+        ctx.globalAlpha=1;
+    }
     if(p.type==='arrow'){
         ctx.fillStyle='#ffdd44';
         ctx.fillRect(px2,py2, 7*s, 2*s);
@@ -2629,6 +3062,27 @@ function towerUpdate(t){
     if(t.cooldown>0) return;
     let rate = Math.floor(t.rate / globalSpeedMult * kingdomRateMult * (1-(t.apprenticeRateBonus||0)));
     if(activeWeather==='blizzard') rate = Math.floor(rate*1.5); // fires 50% slower
+
+    if(t.id==='necromancer'){
+        // Doesn't fire projectiles — instead periodically resurrects
+        // skeletonCount skeletons that melee whatever's nearby.
+        t.cooldown = rate;
+        let count = (t.skeletonCount || 1) + kingdomHealersSkeletonBonus;
+        for(let i=0;i<count;i++){
+            skeletonAllies.push({
+                x: t.x+10+i*4, y: t.y+16,
+                life: 480, // ~8s at 60fps before the skeleton crumbles
+                hitTimer: 0,
+                dmg: t.dmg*globalDmgMult*waveDmgMult*(t.level>1?1+t.level*0.3:1),
+                rangePercent: t.rangePercent,
+                sourceTowerId: 'necromancer',
+                bobSeed: Math.random()*10,
+            });
+        }
+        particles.push({x:t.x+10,y:t.y+10,vx:0,vy:-1,life:20,color:'#88ff88',size:5});
+        return;
+    }
+
     // Percentage-based range: tower covers from 0% to rangePercent of the stage width (left side)
     let rangePercent = (t.rangePercent !== undefined) ? t.rangePercent : 50;
     if(activeWeather==='fog') rangePercent *= 0.5;
@@ -2638,6 +3092,7 @@ function towerUpdate(t){
         if(e.dead) return;
         // Check if enemy is in tower's range zone (percentage-based only)
         if(e.x > maxEnemyX) return;
+        if(!canTowerHit(t.id, e)) return; // flying/underground enemies only hit by their designated towers
         if(towerTargetMode==='strongest'){
             let score = -e.maxHp; // most-max-HP wins; lower score = better
             if(score<best){ best=score; target=e; }
@@ -2648,6 +3103,13 @@ function towerUpdate(t){
     });
     if(!target) return;
     t.cooldown=rate;
+    // Overclock: towers fire faster overall, but each shot has a chance to
+    // jam and do nothing — the cooldown still resets as normal, so the
+    // tower just wasted this attack window.
+    if(overclockJamChance>0 && Math.random()<overclockJamChance){
+        particles.push({x:t.x+10,y:t.y-4,vx:0,vy:-0.5,life:14,color:'#888888',size:3});
+        return;
+    }
     let dist=Math.hypot(target.x-t.x, target.y-t.y);
     let angle=Math.atan2(target.y-t.y, target.x-t.x);
     let spd=3;
@@ -2662,6 +3124,9 @@ function towerUpdate(t){
     if(t.id==='archer' || t.id==='axeman') dmg += kingdomDmgBonusArcherAxe;
     if(t.apprenticeDmgBonus) dmg += t.apprenticeDmgBonus;
     if(activeWeather==='rain' && t.id==='firemage') dmg *= 0.5; // fire towers weaker in the rain
+    // Commander: every tower has a chance to crit for double damage.
+    let isCrit = commanderCritChance>0 && Math.random()<commanderCritChance;
+    if(isCrit) dmg *= 2;
     let sx=t.x+10, sy=t.y;
 
     if(t.id==='lightning'){
@@ -2678,7 +3143,7 @@ function towerUpdate(t){
             usedIds.add(current);
             let next=null, nd=t.chainRadius;
             enemies.forEach(e2=>{
-                if(e2.dead || usedIds.has(e2)) return;
+                if(e2.dead || usedIds.has(e2) || !canTowerHit(t.id, e2)) return;
                 let d=Math.hypot(e2.x-current.x, e2.y-current.y);
                 if(d<nd){ nd=d; next=e2; }
             });
@@ -2698,10 +3163,11 @@ function towerUpdate(t){
         // not everything along a straight line the way a flat shot would.
         let totalLife = Math.max(20, Math.ceil(dist/spd));
         let arcHeight = Math.min(50, 15+dist*0.15);
-        projectiles.push({sx,sy,tx:target.x,ty:target.y,x:sx,y:sy,life:totalLife,totalLife,arcHeight,arc:true,dmg,type:ptype,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+        if(t.id==='ballista') arcHeight *= 1.25; // Ballista's bolt arcs noticeably higher than Axeman/Poison's shared trajectory
+        projectiles.push({sx,sy,tx:target.x,ty:target.y,x:sx,y:sy,life:totalLife,totalLife,arcHeight,arc:true,dmg,type:ptype,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison,crit:isCrit});
     } else {
         let life = Math.ceil(dist/spd)+15; // enough frames to actually reach the target, regardless of range
-        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison});
+        projectiles.push({x:sx,y:sy,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd,dmg,type:ptype,life,freeze:t.freeze,freezeBonusMult,splash:effSplash,pierce:t.pierce,sourceTowerId:t.id,hitSet:new Set(),poison:t.poison,crit:isCrit});
     }
 }
 
@@ -2722,19 +3188,22 @@ function gameLoop(time){
 
     if(state==='playing'){
         spawnTimer++;
-        let spawnInterval = activeWeather==='night' ? 15 : 30;
-        if(spawnQueue.length>0 && spawnTimer>spawnInterval){
-            if(enemies.filter(e=>!e.dead).length < MAX_ALIVE_ENEMIES){
-                spawnTimer=0;
-                enemies.push(spawnEnemy(spawnQueue.shift()));
+        let spawnParams = getSpawnParams();
+        if(spawnQueue.length>0 && spawnTimer>spawnParams.interval){
+            spawnTimer=0;
+            let aliveCount = enemies.filter(e=>!e.dead).length;
+            if(aliveCount < MAX_ALIVE_ENEMIES){
+                let toSpawn = Math.min(spawnParams.batchSize, spawnQueue.length, MAX_ALIVE_ENEMIES-aliveCount);
+                for(let i=0;i<toSpawn;i++) enemies.push(spawnEnemy(spawnQueue.shift()));
             }
         }
 
         enemies.forEach(e=>{
             if(e.dead){ e.deathTimer++; return; }
             let spd=e.speed;
+            if(activeAffix==='vanguard') spd*=1.6;
             if(e.frozen>0){ spd*=0.3; e.frozen--; }
-            if(hasMoat && e.x<130) spd*=0.5;
+            if(hasMoat && e.x<130) spd*=Math.max(0.05, 0.5/getCardEffectMult('moat'));
             if(e.poisonTicks>0){
                 e.poisonTimer++;
                 if(e.poisonTimer>=15){
@@ -2780,6 +3249,10 @@ function gameLoop(time){
                     if(e.type==='bombbeetle') fullDmg = 34;
                     if(e.type==='golemsentinel') fullDmg = 36;
                     if(e.type==='rottedrevenant') fullDmg = 30;
+                    if(e.type==='skyraider') fullDmg = 20;
+                    if(e.type==='wyvern') fullDmg = 34;
+                    if(e.type==='stoneburrower') fullDmg = 28;
+                    if(e.type==='graveworm') fullDmg = 32;
                     castleHP -= fullDmg*waveContactDmgMult*(1-runPowerupBonuses.luckycharm);
                     e.dead=true; 
                 } 
@@ -2791,20 +3264,97 @@ function gameLoop(time){
         if(towersFrozen>0) towersFrozen--;
         towers.forEach(t=>towerUpdate(t));
 
+        // Necromancer's skeleton allies: seek the nearest living enemy inside
+        // their range, walk to melee distance, then poke it every ~0.5s
+        // until their lifespan runs out.
+        skeletonAllies.forEach(sk=>{
+            sk.life--;
+            let maxEnemyX = (sk.rangePercent * GAME_W / 100);
+            let target=null, best=Infinity;
+            enemies.forEach(e=>{
+                if(e.dead || e.x>maxEnemyX || !canTowerHit('necromancer', e)) return;
+                let d=Math.abs(e.x-sk.x);
+                if(d<best){ best=d; target=e; }
+            });
+            if(target){
+                let dist = target.x - sk.x;
+                if(Math.abs(dist)>14){
+                    sk.x += Math.sign(dist)*1.4; // walk toward target
+                } else {
+                    sk.hitTimer++;
+                    if(sk.hitTimer>=30){
+                        sk.hitTimer=0;
+                        applyDamageToEnemy(target, sk.dmg, sk.sourceTowerId);
+                        particles.push({x:target.x,y:target.y,vx:0,vy:-0.5,life:10,color:'#ddddee',size:3});
+                    }
+                }
+            }
+        });
+        skeletonAllies = skeletonAllies.filter(sk=>sk.life>0);
+
         if(hasDragon){
             dragonTimer++;
             if(dragonTimer>180){
                 dragonTimer=0;
-                enemies.forEach(e=>{ if(!e.dead && e.x<300) e.hp-=20*globalDmgMult; });
+                let dmg = 20*getCardEffectMult('dragon')*globalDmgMult;
+                enemies.forEach(e=>{ if(!e.dead && e.x<300) applyDamageToEnemy(e, dmg, 'dragon'); });
                 particles.push({x:70,y:130,vx:5,vy:0,life:30,color:'#ff4400',size:8});
             }
         }
         if(hasMeteor){
+            // Fires at the same speed as the Cannon (rate 500), always targets
+            // whichever alive enemy has the most max HP (the "strongest"),
+            // and splashes out to twice the Cannon's splash radius (30 -> 60).
             meteorTimer++;
-            if(meteorTimer>300){
+            if(meteorTimer>500){
                 meteorTimer=0;
-                enemies.forEach(e=>{ if(!e.dead) e.hp-=30*globalDmgMult; });
-                particles.push({x:GAME_W/2,y:50,vx:0,vy:4,life:40,color:'#ff8800',size:10});
+                let alive = enemies.filter(e=>!e.dead);
+                if(alive.length){
+                    let target = alive.reduce((best,e)=> e.maxHp>best.maxHp?e:best, alive[0]);
+                    let dmg = 20*getCardEffectMult('meteor_card')*globalDmgMult;
+                    let splashRadius = 60; // 2x Cannon's splash radius of 30
+                    enemies.forEach(e=>{
+                        if(e.dead) return;
+                        if(Math.hypot(e.x-target.x, e.y-target.y) <= splashRadius) applyDamageToEnemy(e, dmg, 'meteor');
+                    });
+                    particles.push({x:target.x,y:50,vx:0,vy:4,life:40,color:'#ff8800',size:10});
+                }
+            }
+        }
+        if(hasWizard){
+            // Cycles through fire -> ice -> lightning, one spell every ~200
+            // frames, each scaling with getCardEffectMult('wizard').
+            wizardTimer++;
+            if(wizardTimer>200){
+                wizardTimer=0;
+                let spellTypes=['fire','ice','lightning'];
+                let spell = spellTypes[wizardSpellIndex % spellTypes.length];
+                wizardSpellIndex++;
+                let m = getCardEffectMult('wizard');
+                let inRange = enemies.filter(e=>!e.dead && e.x<300);
+                if(inRange.length){
+                    if(spell==='fire'){
+                        let tgt = inRange[Math.floor(Math.random()*inRange.length)];
+                        applyDamageToEnemy(tgt, 15*m*globalDmgMult, 'wizard');
+                        if(!tgt.dead){ tgt.burnTicks=(tgt.burnTicks||0)+4; tgt.burnTimer=0; tgt.burnDmgPerTick=3*m; tgt.burnSource='wizard'; }
+                        particles.push({x:tgt.x,y:tgt.y,vx:0,vy:-1,life:20,color:'#ff6600',size:6});
+                    } else if(spell==='ice'){
+                        inRange.forEach(e=>{ e.frozen = Math.max(e.frozen||0, Math.round(40*kingdomEffectDurationMult)); });
+                        particles.push({x:150,y:150,vx:0,vy:0,life:20,color:'#44ccff',size:10});
+                    } else if(spell==='lightning'){
+                        let current = inRange[Math.floor(Math.random()*inRange.length)];
+                        let used=new Set(), hitList=[];
+                        for(let i=0;i<3 && current;i++){
+                            applyDamageToEnemy(current, 15*m*globalDmgMult*Math.pow(0.6,i), 'wizard');
+                            hitList.push({x:current.x,y:current.y});
+                            used.add(current);
+                            let next=null, nd=70;
+                            enemies.forEach(e2=>{ if(e2.dead||used.has(e2)) return; let d=Math.hypot(e2.x-current.x,e2.y-current.y); if(d<nd){ nd=d; next=e2; } });
+                            current=next;
+                        }
+                        lightningBolts.push({points:[{x:150,y:120},...hitList], life:10});
+                    }
+                }
             }
         }
 
@@ -2822,6 +3372,7 @@ function gameLoop(time){
             enemies.forEach(e=>{
                 if(e.dead) return;
                 if(p.hitSet && p.hitSet.has(e)) return;
+                if(!canTowerHit(p.sourceTowerId, e)) return; // flying/underground enemies only hit by their designated towers
                 if(Math.abs(p.x-e.x)<14 && Math.abs(p.y-e.y)<18 && p.life>0){
                     if(p.freeze){ e.frozen=Math.round(60*kingdomEffectDurationMult*(p.freezeBonusMult||1)); }
                     else {
@@ -2843,7 +3394,7 @@ function gameLoop(time){
                     }
                     if(p.splash){
                         let splashMult = (p.sourceTowerId==='cannon'||p.sourceTowerId==='poison') ? kingdomSplashBonusMult : 1;
-                        enemies.forEach(e2=>{ if(!e2.dead && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) applyDamageToEnemy(e2, p.dmg*0.5*splashMult, p.sourceTowerId); });
+                        enemies.forEach(e2=>{ if(!e2.dead && canTowerHit(p.sourceTowerId, e2) && Math.hypot(e2.x-e.x,e2.y-e.y)<p.splash) applyDamageToEnemy(e2, p.dmg*0.5*splashMult, p.sourceTowerId); });
                     }
                     if(p.hitSet) p.hitSet.add(e);
                     if(!p.pierce) p.life=0;
@@ -2853,7 +3404,7 @@ function gameLoop(time){
             // landing, splashing poison over the area instead of doing nothing.
             if(p.type==='poison' && p.arc && p.life<=0 && p.hitSet && p.hitSet.size===0 && p.splash){
                 enemies.forEach(e2=>{
-                    if(!e2.dead && Math.hypot(e2.x-p.tx,e2.y-p.ty)<p.splash){
+                    if(!e2.dead && canTowerHit(p.sourceTowerId, e2) && Math.hypot(e2.x-p.tx,e2.y-p.ty)<p.splash){
                         applyDamageToEnemy(e2, p.dmg*kingdomSplashBonusMult, p.sourceTowerId);
                         if(p.poison && !e2.dead){
                             e2.poisonTicks = p.poison.ticks;
@@ -2881,6 +3432,7 @@ function gameLoop(time){
 
     // Draw enemies and projectiles on top
     enemies.forEach(e=>drawEnemy(e,ox,oy,s));
+    skeletonAllies.forEach(sk=>drawSkeletonAlly(sk,ox,oy,s));
     projectiles.forEach(p=>drawProjectile(p,ox,oy,s));
 
     lightningBolts.forEach(b=>{
