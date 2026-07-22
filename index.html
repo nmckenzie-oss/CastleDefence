@@ -378,6 +378,7 @@ function runPrerunQuiz(onComplete){
                 let elapsed = (performance.now()-startTime)/1000;
                 let isCorrect = btn.dataset.correct==='true';
                 prerunQuizTimes.push(elapsed);
+                adjustQuestionWeight(q, isCorrect);
                 if(isCorrect){ btn.classList.add('correct'); prerunQuizCorrect++; recordCorrectAnswer(); }
                 else { btn.classList.add('wrong'); modalRoot.querySelectorAll('.choice-btn').forEach(b=>{ if(b.dataset.correct==='true') b.classList.add('correct'); }); }
                 modalRoot.querySelectorAll('.choice-btn').forEach(b=>b.onclick=null);
@@ -515,7 +516,28 @@ let questions = null;
 let currentBankName = '';
 let currentBankCode = '';
 
-function randQ() { return questions[Math.floor(Math.random()*questions.length)]; }
+// Picks a question weighted by q.weight — questions answered wrong recently
+// are proportionally more likely to come up again, questions answered right
+// recently are proportionally less likely, so practice naturally concentrates
+// on whatever a student is actually struggling with.
+function randQ() {
+    let totalWeight = questions.reduce((sum,q)=> sum + (q.weight??1), 0);
+    let r = Math.random()*totalWeight;
+    for(let q of questions){
+        r -= (q.weight??1);
+        if(r<=0) return q;
+    }
+    return questions[questions.length-1]; // floating-point fallback, practically never hit
+}
+
+// Every question starts at weight 1. A correct answer halves it (floor 0.1
+// — it can still come up, just rarely). A wrong answer doubles it (cap 16 —
+// it comes up often, but never so often it crowds out everything else).
+function adjustQuestionWeight(q, wasCorrect){
+    if(!q) return;
+    let w = q.weight ?? 1;
+    q.weight = wasCorrect ? Math.max(0.1, w*0.5) : Math.min(16, w*2);
+}
 
 // ── Teacher setup ──────────────────────────────────────────────────────────
 // These are the codes students/teachers type on the title screen, mapped to a
@@ -549,7 +571,7 @@ async function loadQuestionBank(code) {
         if(!bankRes.ok) throw new Error('bank fetch failed');
         const bankData = await bankRes.json();
         if(!Array.isArray(bankData) || bankData.length===0) throw new Error('empty bank');
-        questions = bankData.map(item => ({ q:item.q, a:item.o, c:item.a }));
+        questions = bankData.map(item => ({ q:item.q, a:item.o, c:item.a, weight:1 }));
         currentBankName = entry.name || code.toUpperCase();
         currentBankCode = code;
         return { ok:true, name: currentBankName };
@@ -1170,6 +1192,7 @@ function askBetweenQuestion(){
     modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
         btn.onclick=()=>{
             let isCorrect=btn.dataset.correct==='true';
+            adjustQuestionWeight(q, isCorrect);
             if(isCorrect){
                 btn.classList.add('correct');
                 betweenWaveCorrect++;
@@ -1328,6 +1351,7 @@ function showQuestion(){
     modalRoot.querySelectorAll('.choice-btn').forEach(btn=>{
         btn.onclick=()=>{
             let isCorrect=btn.dataset.correct==='true';
+            adjustQuestionWeight(q, isCorrect);
             if(isCorrect){
                 btn.classList.add('correct');
                 recordCorrectAnswer();
