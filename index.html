@@ -5,29 +5,94 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Castle Defence</title>
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;700&amp;family=Courier+New:wght@400;700&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&amp;family=VT323&amp;family=Lexend:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
   <style>
+    :root {
+      --bg-primary: #0a0a0a;
+      --panel-dark: #1a0a2e;
+      --border-purple: #6a0572;
+      --accent-pink: #e94560;
+      --accent-blue: #00d4ff;
+      --accent-rose: #ff8fa8;
+      --accent-violet: #a855f7;
+      --gold: #d4af37;
+      --green: #2ecc71;
+      --red: #e74c3c;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Lexend', sans-serif; overflow: hidden; background: #0a0a0a; }
+    body { font-family: 'Lexend', sans-serif; overflow: hidden; background: var(--bg-primary); color: var(--accent-blue); }
     canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: crosshair; }
-    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 100; }
-    .modal-box { background: linear-gradient(135deg, #1a0a2e 0%, #2d1b4e 100%); border: 3px solid #6a0572; border-radius: 12px; padding: 24px; max-width: 600px; width: 90%; color: #eee; font-family: 'Lexend', sans-serif; box-shadow: 0 0 20px rgba(106, 5, 114, 0.5); }
-    .modal-box h2 { color: #00d4ff; margin-bottom: 12px; font-size: 30px; font-family: 'Courier New', monospace; font-weight: 700; }
-    .modal-box p { font-size: 18px; color: #ddd; }
-    .choice-btn { display: block; width: 100%; padding: 12px; margin: 8px 0; background: #1a0a2e; border: 2px solid #e94560; color: #fff; font-family: 'Lexend', sans-serif; font-size: 14px; cursor: pointer; text-align: left; border-radius: 6px; transition: all 0.2s ease; }
-    .choice-btn:hover { background: #e94560; transform: scale(1.02); }
-    .choice-btn.correct { background: #2ecc71; border-color: #2ecc71; }
-    .choice-btn.wrong { background: #e74c3c; border-color: #e74c3c; }
-    .card-btn { display: inline-block; padding: 16px; margin: 8px; background: #1a0a2e; border: 2px solid #e94560; color: #fff; font-family: 'Lexend', sans-serif; font-size: 13px; cursor: pointer; text-align: center; min-width: 140px; vertical-align: top; border-radius: 8px; transition: all 0.2s ease; }
-    .card-btn:hover { border-color: #e94560; background: #e94560; transform: scale(1.05); }
-    .boss-splash { position: fixed; inset: 0; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 200; color: #e94560; font-family: 'Courier New', monospace; animation: bossShake 0.1s infinite; }
+    .title-font { font-family: 'Press Start 2P', cursive; letter-spacing: 1px; color: var(--accent-blue); text-shadow: 0 0 8px rgba(0,212,255,0.6), 0 0 18px rgba(0,212,255,0.25); }
+    .subtitle-font { font-family: 'VT323', monospace; color: var(--accent-rose); text-shadow: 0 0 4px rgba(255,143,168,0.35); letter-spacing: 0.5px; font-size: clamp(22px, 5.5vw, 42px); }
+    .section-label-font { font-family: 'Press Start 2P', cursive; color: var(--accent-blue); font-size: clamp(9px, 2.2vw, 11px); letter-spacing: 1px; text-shadow: 0 0 6px rgba(0,212,255,0.4); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 100; overflow-y: auto; padding: 24px 0; }
+    .modal-box { background: linear-gradient(135deg, #1a0a2e 0%, #2d1b4e 100%); border: 3px solid var(--border-purple); border-radius: 12px; padding: clamp(18px,3vw,28px); max-width: 640px; width: 92%; color: var(--accent-blue); font-family: 'Lexend', sans-serif; box-shadow: 0 0 20px rgba(106, 5, 114, 0.5); margin: auto; }
+    .modal-box h2 { font-family: 'Press Start 2P', cursive; color: var(--accent-blue); margin-bottom: 14px; font-size: clamp(16px, 3.2vw, 24px); font-weight: 700; letter-spacing: 1px; text-shadow: 0 0 8px rgba(0,212,255,0.5); line-height: 1.5; }
+    .modal-box p { font-size: clamp(14px, 2.2vw, 18px); color: var(--accent-blue); opacity: 0.9; }
+    .choice-btn { display: block; width: 100%; padding: 14px; margin: 8px 0; background: rgba(255,143,168,0.12); border: 2px solid var(--accent-rose); color: #fff; font-family: 'Lexend', sans-serif; font-size: clamp(14px, 2.2vw, 16px); font-weight: 600; cursor: pointer; text-align: left; border-radius: 6px; transition: all 0.2s ease; }
+    .choice-btn:hover { background: var(--accent-rose); color: #1a0a2e; transform: scale(1.02); }
+    .choice-btn.correct { background: var(--green); border-color: var(--green); color: #fff; }
+    .choice-btn.wrong { background: var(--red); border-color: var(--red); color: #fff; }
+    .card-btn { display: inline-block; padding: 16px; margin: 8px; background: rgba(255,143,168,0.12); border: 2px solid var(--accent-rose); color: #fff; font-family: 'Lexend', sans-serif; font-size: clamp(13px, 2vw, 15px); cursor: pointer; text-align: center; min-width: 150px; vertical-align: top; border-radius: 8px; transition: all 0.2s ease; }
+    .card-btn:hover { border-color: var(--accent-rose); background: var(--accent-rose); color: #1a0a2e; transform: scale(1.05); }
+    .kingdom-tab-btn { border-color: var(--accent-violet) !important; box-shadow: 0 0 10px rgba(168,85,247,0.3); }
+    .kingdom-tab-btn:hover { border-color: #c084fc !important; box-shadow: 0 0 18px rgba(168,85,247,0.6); }
+    .kingdom-tab-btn.active-tab { background: linear-gradient(160deg, #4a1a75 0%, #2a1040 100%) !important; box-shadow: 0 0 14px rgba(168,85,247,0.85) !important; border-color: #c084fc !important; }
+    .boss-splash { position: fixed; inset: 0; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 200; color: var(--accent-pink); font-family: 'Press Start 2P', cursive; animation: bossShake 0.1s infinite; }
     @keyframes bossShake { 0%,100%{transform:translate(0)} 25%{transform:translate(-2px,2px)} 75%{transform:translate(2px,-2px)} }
-    .hud { position: fixed; top: 0; left: 0; right: 0; padding: 12px 20px; display: flex; justify-content: space-between; color: #eee; font-size: 14px; z-index: 50; background: rgba(10, 10, 10, 0.95); font-family: 'Lexend', sans-serif; }
-    .hud-left, .hud-right { display: flex; gap: 30px; }
-    .ammo-btn { position: fixed; bottom: 16px; right: 16px; z-index: 50; padding: 12px 20px; background: #1a0a2e; border: 2px solid #e94560; color: #fff; font-family: 'Lexend', sans-serif; font-size: 13px; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
-    .ammo-btn:hover { background: #e94560; transform: scale(1.05); }
-    .target-btn { position: fixed; bottom: 16px; left: 16px; z-index: 50; padding: 12px 20px; background: #1a0a2e; border: 2px solid #00d4ff; color: #fff; font-family: 'Lexend', sans-serif; font-size: 13px; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
-    .target-btn:hover { background: #00d4ff; color:#0a0a1a; transform: scale(1.05); }
+    .hud-left, .hud-right {
+      position: fixed; top: 14px; z-index: 50;
+      background: linear-gradient(135deg, rgba(26,10,46,0.75) 0%, rgba(18,8,32,0.75) 100%);
+      border: 1px solid var(--border-purple);
+      border-radius: 10px;
+      padding: 8px 14px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: 'Lexend', sans-serif;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .hud-left { left: 14px; align-items: flex-start; }
+    .hud-right { right: 14px; align-items: flex-end; text-align: right; }
+    .ammo-btn { position: fixed; bottom: 16px; right: 16px; z-index: 50; padding: 12px 20px; background: rgba(255,143,168,0.12); border: 2px solid var(--accent-rose); color: #fff; font-family: 'Lexend', sans-serif; font-size: clamp(13px,1.8vw,15px); font-weight: 600; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
+    .ammo-btn:hover { background: var(--accent-rose); color: #1a0a2e; transform: scale(1.05); }
+    .target-btn { position: fixed; bottom: 16px; left: 16px; z-index: 50; padding: 12px 20px; background: var(--panel-dark); border: 2px solid var(--accent-blue); color: #fff; font-family: 'Lexend', sans-serif; font-size: clamp(13px,1.8vw,15px); font-weight: 600; cursor: pointer; border-radius: 8px; transition: all 0.2s ease; }
+    .home-page { position: fixed; inset: 0; background: var(--bg-primary); z-index: 100; overflow-y: auto; display: flex; align-items: flex-start; justify-content: center; padding: clamp(24px,4vh,60px) 16px; }
+    .home-page .home-inner { max-width: 560px; width: 100%; text-align: center; margin: auto; position: relative; z-index: 1; }
+    #home-bg-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.4; z-index: 0; pointer-events: none; }
+    body:has(.modal-overlay) .hud, body:has(.modal-overlay) .ammo-btn, body:has(.modal-overlay) .target-btn,
+    body:has(.home-page) .hud, body:has(.home-page) .ammo-btn, body:has(.home-page) .target-btn { display: none; }
+    .canva-button { background: linear-gradient(160deg, #3d1155 0%, #240a38 100%); border: 2px solid var(--accent-pink); color: #ffffff !important; transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; box-shadow: 0 0 10px rgba(233,69,96,0.25); }
+    .canva-button:hover { transform: scale(1.05); border-color: #ff6b81; background: linear-gradient(160deg, #5c1a75 0%, #33104a 100%); box-shadow: 0 0 18px rgba(233,69,96,0.6); }
+    #screenWipe {
+      position: fixed;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent 0%, #0a0a0a 20%, #0a0a0a 80%, transparent 100%);
+      z-index: 300;
+      pointer-events: none;
+      opacity: 0;
+    }
+    #screenWipe.wipe { animation: wipeAcross 1.5s ease-in-out; }
+    @keyframes wipeAcross {
+      0% { left: -100%; opacity: 1; }
+      50% { left: 0%; opacity: 1; }
+      100% { left: 100%; opacity: 1; }
+    }
+    .modal-box.question-modal {
+      max-width: 760px;
+      width: 92%;
+      background: none;
+      border: none;
+      box-shadow: none;
+      max-height: 100%;
+    }
+    .question-modal h2.title-font { font-size: clamp(20px, 4vw, 30px); }
+    .question-modal p { font-size: clamp(14px, 2.4vw, 18px) !important; }
+    .question-modal .choice-btn { font-size: clamp(14px, 2.2vw, 17px); padding: 16px; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.0/dist/umd/lucide.min.js" type="text/javascript"></script>
   <script src="/_sdk/e3937a0574eb2d69.data_sdk.js" type="text/javascript" integrity="sha512-xbp/ACqEQy1aDxYMtXTrR3y5MUbzxuggRR/9sD48Gl4VhLMMCiAHsxMaFV6DTdeBpR6ymF+t2zhPKYkWM3+Jfw=="></script>
@@ -39,17 +104,18 @@
     <span id="hud-hp">❤️ HP: 100/100</span> <span id="hud-ammo">🏹 Ammo: 3/10</span>
    </div>
    <div class="hud-right">
-    <span id="hud-gold">🪙 Gold: 0</span> <button id="cashout-btn" style="display:none;margin-left:6px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid #ffcc44;background:rgba(255,204,68,0.15);color:#ffcc44;cursor:pointer;font-family:'Lexend',sans-serif;vertical-align:middle" aria-label="Gold is maxed out — end this run early and bank your Crowns">💰 Gold Maxed — Cash Out</button> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 Loading...</span> <span id="hud-weather" style="color:#ffcc44"></span>
+    <span id="hud-gold">🪙 Coins: 0</span> <button id="cashout-btn" style="display:none;margin-left:6px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid #ffcc44;background:rgba(255,204,68,0.15);color:#ffcc44;cursor:pointer;font-family:'Lexend',sans-serif;vertical-align:middle" aria-label="Coins are maxed out — end this run early and bank your Crowns">💰 Coins Maxed — Cash Out</button> <span id="hud-wave">⭐ Wave: 1</span> <span id="hud-bank" style="color:#00d4ff">📚 Loading...</span> <span id="hud-weather" style="color:#ffcc44"></span>
    </div>
   </div><button class="ammo-btn" id="ammo-btn" aria-label="Get ammo by answering a question">🏹 Get Ammo (Q)</button>
   <button class="target-btn" id="target-btn" aria-label="Cycle tower targeting mode">🎯 Targeting: Nearest</button>
   <canvas id="game"></canvas>
   <div id="modal-root"></div>
+  <div id="screenWipe" aria-hidden="true"></div>
   <script src="/_sdk/b7bbbe551ba4f8f5.editing_sdk.js" integrity="sha512-h06pMz6KcVo4Wjvoggb4sS5DZpb55bTriAzBmA0YwbkBA3z2ZXl8CBEbCWT+/fAsm0SwDejJ7jJHOZsLZKqPoQ=="></script>
   <script>
 (function(){
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+let ctx = canvas.getContext('2d');
 const modalRoot = document.getElementById('modal-root');
 
 let W, H, scale;
@@ -66,6 +132,15 @@ window.addEventListener('resize', resize);
 
 let state = 'start';
 let wave = 0, castleHP = 100, maxHP = 100, ammo = 3, maxAmmo = 10, gold = 0, maxGold = 100, kills = 0;
+let lastDamageSource = null;
+const ENEMY_DISPLAY_NAMES = {
+    goblin: 'Goblin', skeleton: 'Skeleton', knight: 'Knight', wolf: 'Wolf', siege: 'Siege Engine',
+    boss: 'Boss', wagon: 'Coin Wagon', goblin_scout: 'Goblin Scout', goblin_armored: 'Armored Goblin',
+    shade: 'Shade', wolf_dire: 'Dire Wolf', leshy: 'Leshy', wisphawk: 'Wisphawk',
+    brambletreant: 'Bramble Treant', embersalamander: 'Ember Salamander', irongolem: 'Iron Golem',
+    bombbeetle: 'Bomb Beetle', golemsentinel: 'Golem Sentinel', rottedrevenant: 'Rotted Revenant',
+    skyraider: 'Sky Raider', wyvern: 'Wyvern', stoneburrower: 'Stone Burrower', graveworm: 'Graveworm'
+};
 // maxHP before Castle Keep's percentage bonus is layered on top — Stone
 // Walls and the Kingdom's Reinforced Walls both add to this directly, while
 // Keep's own bonus is always computed fresh off THIS value (see
@@ -157,12 +232,14 @@ function loadKingdomSave(){
                 crowns: parsed.crowns||0,
                 levels: parsed.levels||{},
                 totalCorrectAnswers: parsed.totalCorrectAnswers||0,
+                totalKills: parsed.totalKills||0,
+                bestWave: parsed.bestWave||0,
                 equippedPowerups: parsed.equippedPowerups||[],
                 notifiedThresholds: parsed.notifiedThresholds||[],
             };
         }
     } catch(err){ console.warn('Kingdom save unavailable (localStorage blocked) — progress will not persist this session.', err); }
-    return { crowns:0, levels:{}, totalCorrectAnswers:0, equippedPowerups:[], notifiedThresholds:[] };
+    return { crowns:0, levels:{}, totalCorrectAnswers:0, totalKills:0, bestWave:0, equippedPowerups:[], notifiedThresholds:[] };
 }
 let kingdomStorageOk = true;
 function saveKingdomSave(){
@@ -369,7 +446,7 @@ function runPrerunQuiz(onComplete){
         let q = randQ();
         let startTime = performance.now();
         let shuffled = q.a.map((a,i)=>({text:a,correct:i===q.c})).sort(()=>Math.random()-0.5);
-        let html = `<div class="modal-overlay"><div class="modal-box"><h2>🎲 Powerup Calibration — Question ${qIndex+1}/4</h2><p style="margin-bottom:8px;color:#8cf;font-size:12px">Answer quickly and correctly to strengthen this run's equipped powerups.</p><p style="margin-bottom:16px">${q.q}</p>`;
+        let html = `<div class="modal-overlay"><div class="modal-box question-modal"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">Powerup Calibration — Q${qIndex+1}/4</h2><p style="margin-bottom:8px;color:#8cf;font-size:12px">Answer quickly and correctly to strengthen this run's equipped powerups.</p><p style="margin-bottom:16px">${q.q}</p>`;
         shuffled.forEach(a=>{ html+=`<button class="choice-btn" data-correct="${a.correct}">${a.text}</button>`; });
         html+=`</div></div>`;
         modalRoot.innerHTML = html;
@@ -427,7 +504,7 @@ const AFFIX_DEFS = [
     { id:'wolves',   name:'🐺 The Wolves',        desc:'Only fast wolves this wave — brace for speed' },
     { id:'guard',    name:'🛡️ Royal Guard',       desc:'Only heavily-armored knights this wave' },
     { id:'undead',   name:'💀 Undead Rising',     desc:'Slain enemies rise again as skeletons' },
-    { id:'caravan',  name:'💰 Treasure Caravan',  desc:'Kill the gold wagons for bonus gold!' },
+    { id:'caravan',  name:'💰 Treasure Caravan',  desc:'Kill the coin wagons for bonus coins!' },
     { id:'vanguard',      name:'💨 Swift Vanguard',   desc:'Every enemy moves 60% faster this wave' },
     { id:'ironlegion',    name:'🗿 Iron Legion',      desc:'Only heavily-armored specialists — bring the right counters' },
     { id:'skyswarm',      name:'🦅 Sky Swarm',        desc:'Fast, fragile enemies in overwhelming numbers' },
@@ -449,7 +526,7 @@ let runDoubleEnemies = false, runGoldMult = 1;
 let runNoCardRewards = false, runCorrectAnswersGiveGold = false;
 
 const MERCHANT_OFFERS = [
-    { name:'Double Trouble', risk:'Double enemies for the rest of the run', reward:'Double gold for the rest of the run',
+    { name:'Double Trouble', risk:'Double enemies for the rest of the run', reward:'Double coins for the rest of the run',
       apply(){ runDoubleEnemies=true; runGoldMult*=2; } },
     { name:'Bring the Boss', risk:'A boss fight begins immediately', reward:'Free tower once the boss falls',
       apply(){ forceBossThisWave=true; pendingFreeTowerAfterBoss=true; } },
@@ -457,7 +534,7 @@ const MERCHANT_OFFERS = [
       apply(){ maxHPBeforeKeep=Math.max(10,Math.floor(maxHPBeforeKeep/4)); recomputeMaxHP(); ammoPerCorrect*=2; } },
     { name:'Reckless Barrage', risk:'Castle takes double contact damage this wave', reward:'Towers deal +50% damage this wave',
       apply(){ waveContactDmgMult*=2; waveDmgMult*=1.5; } },
-    { name:'Midas Run', risk:'No card rewards for the rest of this run', reward:'Correct answers instead award gold directly, for the rest of the run',
+    { name:'Midas Run', risk:'No card rewards for the rest of this run', reward:'Correct answers instead award coins directly, for the rest of the run',
       apply(){ runNoCardRewards=true; runCorrectAnswersGiveGold=true; } },
     { name:'Glass Cannon', risk:'Max ammo capacity halved (permanent)', reward:'Global damage doubled (permanent)',
       apply(){ maxAmmo=Math.max(1,Math.floor(maxAmmo/2)); ammo=Math.min(ammo,maxAmmo); merchantNpcDmgMult*=2; recomputeGlobalMultipliers(); } },
@@ -554,8 +631,9 @@ const QUESTION_BANK_FILES = {
     '11-13dc': { file:'question-banks/senior-dance-choreography.json', name:'Senior Dance Choreography' },
     '11-13dg': { file:'question-banks/senior-dance-genres.json', name:'Senior Dance Genres' },
     'science': { file:'question-banks/year-9-science-full.json', name:'Science Quiz' },
-    'elfdef': { file:'question-banks/englishlanguagedef.json', name:'English Language Definitions' },
-    'elfex': { file:'question-banks/englishlanguageex.json', name:'English Language Examples' }
+    'elfdef':{ file:'question-banks/englishlanguagedef.json',name:'English Language Features Definitions' },
+    'chef': { file:'question-banks/cooking.json','name':'Cooking'},
+    'elfex': { file:'question-banks/englishlanguageex.json','name':'English Language Features Examples'},
 };
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -644,9 +722,9 @@ const allCards = [
     {id:'axeman',name:'🪓 Axeman',desc:'Short burst axes',type:'tower',group:'towers',groupWeight:60,cardWeight:2.5,dmg:10,rate:80,range:179,rangePercent:35,color:'#aa6633',unlockAt:0},
     {id:'poison',name:'🧪 Alchemist Tower',desc:'Lobs a poison flask in an arc — misses shatter into a poison splash',type:'tower',group:'towers',groupWeight:60,cardWeight:10,dmg:3,rate:170,range:256,rangePercent:50,color:'#77aa22',poison:{ticks:6,dmgPerTick:2.5},splash:22,unlockAt:18},
     {id:'necromancer',name:'💀 Necromancer Tower',desc:'Resurrects a skeleton that melees nearby enemies',type:'tower',group:'towers',groupWeight:60,cardWeight:8,dmg:6,rate:300,range:230,rangePercent:45,color:'#3a3a4a',skeletonCount:1,unlockAt:38},
-    {id:'goldmine',name:'💰 Gold Mine',desc:'+5 gold per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:8},
-    {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max gold',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:0},
-    {id:'merchant',name:'🛒 Merchant',desc:'+20% gold earned',type:'economy',group:'economy',groupWeight:20,cardWeight:10,unlockAt:26},
+    {id:'goldmine',name:'💰 Coin Mine',desc:'+5 coins per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:8},
+    {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max coins',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:0},
+    {id:'merchant',name:'🛒 Merchant',desc:'+20% coins earned',type:'economy',group:'economy',groupWeight:20,cardWeight:10,unlockAt:26},
     {id:'repair',name:'🧱 Repair Wall',desc:'Heal 10 HP per wave',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:10},
     {id:'stonewalls',name:'🛡️ Stone Walls',desc:'+30 max HP',type:'defence',group:'defence',groupWeight:10,cardWeight:40,unlockAt:16},
     {id:'moat',name:'🌊 Moat',desc:'Slows enemies',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:0},
@@ -852,6 +930,7 @@ function bossUpdate(e){
             if(e.abilityTimers.ranged>=rate){
                 e.abilityTimers.ranged=0;
                 castleHP=Math.max(0,castleHP-dmg);
+                lastDamageSource = { type: e.type, flying: !!e.flying, method: 'ranged' };
                 let col = ab.effect==='lightning' ? '#aaeeff' : '#ff6600';
                 for(let i=0;i<6;i++){
                     let t=i/6;
@@ -1146,7 +1225,7 @@ function startBetweenWave(){
 function showMerchant(onDone){
     let offer = MERCHANT_OFFERS[Math.floor(Math.random()*MERCHANT_OFFERS.length)];
     modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center">
-        <h2>🧙 A Mysterious Merchant Appears</h2>
+        <h2 class="title-font" style="background:none;border:none;box-shadow:none;">A Mysterious Merchant Appears</h2>
         <p style="margin:12px 0;color:#aaa">"I have a deal for you, traveler... but deals like this cut both ways."</p>
         <div style="background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:14px;margin:16px 0;text-align:left">
             <div style="font-size:16px;font-weight:bold;color:#ffcc44;margin-bottom:8px">${offer.name}</div>
@@ -1187,7 +1266,7 @@ function askBetweenQuestion(){
     if(betweenWaveQuestions>=4){ showCardSelect(); return; }
     let q=randQ();
     let shuffled = q.a.map((a,i)=>({text:a,correct:i===q.c})).sort(()=>Math.random()-0.5);
-    let html=`<div class="modal-overlay"><div class="modal-box"><h2>Between Waves — Question ${betweenWaveQuestions+1}/4</h2><p style="margin-bottom:16px">${q.q}</p>`;
+    let html=`<div class="modal-overlay"><div class="modal-box question-modal"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">Between Waves — Q${betweenWaveQuestions+1}/4</h2><p style="margin-bottom:16px">${q.q}</p>`;
     shuffled.forEach((a,i)=>{ html+=`<button class="choice-btn" data-correct="${a.correct}">${a.text}</button>`; });
     html+=`</div></div>`;
     modalRoot.innerHTML=html;
@@ -1255,7 +1334,7 @@ function showCardSelect(){
             options[0] = forcedCard;
         }
     }
-    let html=`<div class="modal-overlay"><div class="modal-box"><h2>${betweenWaveCorrect}/4 Correct! Choose one:</h2><div style="margin-top:16px">`;
+    let html=`<div class="modal-overlay"><div class="modal-box"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">${betweenWaveCorrect}/4 Correct! Choose one:</h2><div style="margin-top:16px">`;
     options.forEach((c,i)=>{
         let existing = (c.type==='tower') ? towers.find(t=>t.id===c.id) : null;
         let extra = existing ? `<div style="font-size:10px;color:#4caf50;margin-top:2px">⬆ Upgrade Lv${existing.level+1}</div>` : '';
@@ -1346,7 +1425,7 @@ function showQuestion(){
     state='question';
     let q=randQ();
     let shuffled = q.a.map((a,i)=>({text:a,correct:i===q.c})).sort(()=>Math.random()-0.5);
-    let html=`<div class="modal-overlay"><div class="modal-box"><h2>🏹 Answer for Ammo!</h2><p style="margin-bottom:16px">${q.q}</p><p class="text-sm text-red-400 mb-4 font-bold">⚠️ Warning: Incorrect answers deal 1 damage to your Castle!</p>`;
+    let html=`<div class="modal-overlay"><div class="modal-box question-modal"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">Answer for Ammo!</h2><p style="margin-bottom:16px;font-size:clamp(15px,2.4vw,20px)">${q.q}</p><p style="color:var(--accent-pink);margin-bottom:16px;font-weight:700;font-size:clamp(12px,2vw,14px)">⚠️ Warning: Incorrect answers deal 1 damage to your Castle!</p>`;
     shuffled.forEach((a,i)=>{ html+=`<button class="choice-btn" data-correct="${a.correct}">${a.text}</button>`; });
     html+=`</div></div>`;
     modalRoot.innerHTML=html;
@@ -1468,18 +1547,18 @@ function renderCardsTab(){
 
 function renderKingdomHTML(){
     let html = `<div class="modal-overlay"><div class="modal-box" style="max-width:540px;max-height:85vh;overflow-y:auto;text-align:left">
-        <h2 style="text-align:center">🏰 The Kingdom</h2>
+        <h2 class="title-font" style="text-align:center;background:none;border:none;box-shadow:none;">The Kingdom</h2>
         <p style="text-align:center;color:#ffcc44;font-size:20px;margin:8px 0 4px">👑 ${kingdomSave.crowns} Crowns</p>`;
     if(!kingdomStorageOk){
         html += `<p style="text-align:center;color:#e74c3c;font-size:11px">⚠️ This browser is blocking save data — progress won't persist after you close this tab.</p>`;
     }
     html += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-        <button class="choice-btn kingdom-tab-btn" data-tab="permanent" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='permanent'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Permanent Upgrades</button>
-        <button class="choice-btn kingdom-tab-btn" data-tab="powerups" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='powerups'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Single-Run Powerups</button>
-        <button class="choice-btn kingdom-tab-btn" data-tab="cards" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='cards'?'background:#6a0572;':'background:rgba(0,0,0,0.2);'}">Unlocked Cards</button>
+        <button class="choice-btn kingdom-tab-btn ${kingdomActiveTab==='permanent'?'active-tab':''}" data-tab="permanent" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='permanent'?'':'background:rgba(0,0,0,0.2);'}">Permanent Upgrades</button>
+        <button class="choice-btn kingdom-tab-btn ${kingdomActiveTab==='powerups'?'active-tab':''}" data-tab="powerups" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='powerups'?'':'background:rgba(0,0,0,0.2);'}">Single-Run Powerups</button>
+        <button class="choice-btn kingdom-tab-btn ${kingdomActiveTab==='cards'?'active-tab':''}" data-tab="cards" style="width:auto;flex:1;text-align:center;padding:8px;font-size:12px;${kingdomActiveTab==='cards'?'':'background:rgba(0,0,0,0.2);'}">Unlocked Cards</button>
     </div>`;
     html += kingdomActiveTab==='permanent' ? renderPermanentTab() : (kingdomActiveTab==='powerups' ? renderPowerupsTab() : renderCardsTab());
-    html += `<button class="choice-btn" id="kingdom-close-btn" style="margin-top:16px;text-align:center">Return</button></div></div>`;
+    html += `<button class="choice-btn" id="kingdom-close-btn" style="margin-top:16px;text-align:center">Exit Kingdom</button></div></div>`;
     return html;
 }
 
@@ -1515,17 +1594,31 @@ function showKingdom(onClose){
 }
 
 function showStart(){
-    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center">
-        <h2>🏰 CASTLE DEFENCE</h2>
-        <p style="margin:16px 0;color:#aaa">Defend your castle! Click to shoot arrows.<br>Press Q for ammo questions.<br>Survive the waves!</p>
-        <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid #6a0572;border-radius:8px;padding:12px;margin-bottom:16px">
-            <label for="bank-code-input" style="display:block;font-size:12px;color:#00d4ff;margin-bottom:6px">📚 Question Bank Code — required to play (ask your teacher)</label>
-            <input id="bank-code-input" type="text" placeholder="Class Code" maxlength="20" style="width:100%;padding:8px;border-radius:6px;border:2px solid #e94560;background:#0a0a1a;color:#fff;font-family:'Lexend',sans-serif;font-size:14px;text-transform:lowercase">
+    modalRoot.innerHTML=`<div class="home-page"><canvas id="home-bg-canvas"></canvas><div class="home-inner">
+        <h2 class="title-font" style="background:none;border:none;box-shadow:none;font-size:clamp(24px,6vw,40px);">CASTLE DEFENCE</h2>
+        <p class="subtitle-font" style="margin:6px 0 20px;">Defend the realm. Answer to arm.</p>
+        <div style="display:flex;justify-content:space-between;margin-bottom:20px;padding:0 4px;flex-wrap:wrap;gap:10px">
+            <div style="text-align:center;flex:1;min-width:70px"><p style="font-size:clamp(12px,2vw,14px);font-weight:700;color:var(--accent-blue)">💀 Kills</p><p style="font-size:clamp(18px,2.6vw,22px);font-weight:700;color:#fde047">${kingdomSave.totalKills||0}</p></div>
+            <div style="text-align:center;flex:1;min-width:70px"><p style="font-size:clamp(12px,2vw,14px);font-weight:700;color:var(--accent-blue)">High Score</p><p style="font-size:clamp(18px,2.6vw,22px);font-weight:700;color:#fde047">${kingdomSave.bestWave||0}</p></div>
+            <div style="text-align:center;flex:1;min-width:70px"><p style="font-size:clamp(12px,2vw,14px);font-weight:700;color:var(--accent-blue)">Correct</p><p style="font-size:clamp(18px,2.6vw,22px);font-weight:700;color:#fde047">${kingdomSave.totalCorrectAnswers||0}</p></div>
+            <div style="text-align:center;flex:1;min-width:70px"><p style="font-size:clamp(12px,2vw,14px);font-weight:700;color:var(--accent-blue)">Total Coins</p><p style="font-size:clamp(18px,2.6vw,22px);font-weight:700;color:#fde047">👑 ${kingdomSave.crowns}</p></div>
+        </div>
+        <button class="choice-btn" style="text-align:center;font-size:clamp(13px,2vw,15px);margin-bottom:16px;background:rgba(168,85,247,0.12);border-color:var(--accent-violet)" id="kingdom-btn">The Kingdom</button>
+        <p class="section-label-font" style="margin-bottom:10px;">Description:</p>
+        <p style="text-align:left;font-size:clamp(13px,2vw,15px);line-height:1.7;color:var(--accent-blue);margin-bottom:16px">
+            🏹 Click to shoot arrows and defend your castle<br>
+            📚 Press Q to answer questions and earn ammo<br>
+            🏰 Survive waves and pick cards to grow stronger<br>
+            👑 Earn Crowns to unlock permanent Kingdom upgrades
+        </p>
+        <div style="text-align:left;background:rgba(0,0,0,0.3);border:1px solid var(--border-purple);border-radius:8px;padding:12px;margin-bottom:16px">
+            <label for="bank-code-input" style="display:block;font-size:clamp(12px,1.8vw,14px);color:var(--accent-blue);margin-bottom:6px;font-weight:600">Class Code — required to play (ask your teacher)</label>
+            <input id="bank-code-input" type="text" placeholder="Enter code" maxlength="20" style="width:100%;padding:10px;border-radius:6px;border:2px solid var(--accent-rose);background:#0a0a1a;color:var(--accent-blue);font-family:'Lexend',sans-serif;font-size:clamp(13px,1.8vw,15px);text-transform:lowercase">
             <div id="bank-status" style="font-size:12px;margin-top:6px;min-height:16px;color:#aaa"></div>
         </div>
-        <button class="choice-btn" style="text-align:center;font-size:16px" id="start-btn">⚔️ START GAME</button>
-        <button class="choice-btn" style="text-align:center;font-size:14px;margin-top:8px;background:rgba(0,0,0,0.2)" id="kingdom-btn">🏰 The Kingdom (👑 ${kingdomSave.crowns})</button>
-        ${kingdomSave.equippedPowerups.length ? `<p style="font-size:11px;color:#8cf;margin-top:6px">Equipped: ${kingdomSave.equippedPowerups.map(id=>(RUN_POWERUPS.find(p=>p.id===id)||{}).name).join(', ')}</p>` : ''}
+        <button class="canva-button title-font" style="width:100%;padding:14px;border-radius:6px;text-align:center;font-size:clamp(13px,2vw,16px);color:var(--accent-blue) !important;text-shadow:0 0 8px rgba(0,212,255,0.6),0 0 18px rgba(0,212,255,0.25);text-transform:uppercase;letter-spacing:2px;cursor:pointer;" id="start-btn">Press Start</button>
+        ${kingdomSave.equippedPowerups.length ? `<p style="font-size:11px;color:var(--accent-rose);margin-top:6px">Equipped: ${kingdomSave.equippedPowerups.map(id=>(RUN_POWERUPS.find(p=>p.id===id)||{}).name).join(', ')}</p>` : ''}
+        <p class="section-label-font" style="opacity:0.6;margin-top:18px;">Created by Nate McKenzie</p>
     </div></div>`;
     const input = document.getElementById('bank-code-input');
     const status = document.getElementById('bank-status');
@@ -1564,6 +1657,8 @@ function showGameOver(voluntary){
     if(!gameOverCrownsAwarded){
         lastCrownsEarned = Math.floor(wave*3 + kills*0.2 + gold*0.05);
         kingdomSave.crowns += lastCrownsEarned;
+        kingdomSave.totalKills = (kingdomSave.totalKills||0) + kills;
+        kingdomSave.bestWave = Math.max(kingdomSave.bestWave||0, wave);
         saveKingdomSave();
         gameOverCrownsAwarded = true;
     }
@@ -1575,8 +1670,16 @@ function showGameOver(voluntary){
     }
     let title = lastRunWasVoluntary ? '🏆 Run Complete!' : '💀 GAME OVER';
     let subtitle = lastRunWasVoluntary ? `You banked your progress after ${wave} waves!` : `You survived ${wave} waves!`;
-    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2>${title}</h2><p style="margin:16px 0">${subtitle}</p><p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><p style="color:#ffcc44;font-size:16px;margin:12px 0">👑 +${lastCrownsEarned} Crowns earned (Total: ${kingdomSave.crowns})</p>${unlockHtml}${!kingdomStorageOk?'<p style="color:#e74c3c;font-size:11px">⚠️ Save data is blocked in this browser — Crowns won\'t persist after this tab closes.</p>':''}<button class="choice-btn" style="text-align:center" id="kingdom-btn">🏰 Visit The Kingdom</button><button class="choice-btn" style="text-align:center;margin-top:8px" id="restart-btn">🔄 Play Again</button></div></div>`;
-    document.getElementById('restart-btn').onclick=()=>{ location.reload(); };
+    let deathMsg = '';
+    if(!lastRunWasVoluntary && lastDamageSource){
+        const label = ENEMY_DISPLAY_NAMES[lastDamageSource.type] || lastDamageSource.type;
+        deathMsg = `<p style="color:#ff6b6b;font-weight:bold;margin:10px 0">☠️ Defeated by a ${label}${lastDamageSource.flying ? ` — a flying enemy. Next time, upgrade your Archer Tower or Ballista so you can hit flying threats.` : `. Next time, spend some Crowns in The Kingdom to boost your defenses.`}</p>`;
+    }
+    modalRoot.innerHTML=`<div class="modal-overlay"><div class="modal-box" style="text-align:center"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">${title}</h2><p style="margin:16px 0">${subtitle}</p>${deathMsg}<p style="color:#aaa">Towers built: ${towers.length}<br>Total kills: ${kills}</p><p style="color:#ffcc44;font-size:16px;margin:12px 0">👑 +${lastCrownsEarned} Crowns earned (Total: ${kingdomSave.crowns})</p>${unlockHtml}${!kingdomStorageOk?'<p style="color:#e74c3c;font-size:11px">⚠️ Save data is blocked in this browser — Crowns won\'t persist after this tab closes.</p>':''}<button class="choice-btn" style="text-align:center;background:rgba(168,85,247,0.12);border-color:var(--accent-violet)" id="kingdom-btn">The Kingdom</button><button class="choice-btn title-font" style="text-align:center;margin-top:8px;background:linear-gradient(160deg, #3d1155 0%, #240a38 100%);color:var(--accent-blue) !important;text-shadow:0 0 8px rgba(0,212,255,0.6),0 0 18px rgba(0,212,255,0.25);text-transform:uppercase;letter-spacing:2px;" id="restart-btn">Play Again</button></div></div>`;
+    document.getElementById('restart-btn').onclick=()=>{
+        sessionStorage.setItem('cd_restart_code', currentBankCode || '');
+        location.reload();
+    };
     document.getElementById('kingdom-btn').onclick=()=> showKingdom(()=>showGameOver());
 }
 
@@ -1623,8 +1726,8 @@ function showCashOutConfirm(){
     state='cashout-confirm';
     let projected = Math.floor(wave*3 + kills*0.2 + gold*0.05);
     modalRoot.innerHTML = `<div class="modal-overlay"><div class="modal-box" style="text-align:center">
-        <h2>💰 Gold Maxed Out</h2>
-        <p style="margin:14px 0;color:#ccc">Your gold income is capped at ${maxGold} — any more you earn is being wasted. You can end this run right now and bank what you've got as Crowns instead.</p>
+        <h2 class="title-font" style="background:none;border:none;box-shadow:none;">Coins Maxed Out</h2>
+        <p style="margin:14px 0;color:#ccc">Your coin income is capped at ${maxGold} — any more you earn is being wasted. You can end this run right now and bank what you've got as Crowns instead.</p>
         <p style="color:#ffcc44;font-size:15px;margin:10px 0">👑 ~${projected} Crowns if you cash out now</p>
         <p style="font-size:11px;color:#888;margin-bottom:12px">Waiting costs nothing but potential — surviving further waves and getting more kills would still add to this total. This is purely your call.</p>
         <button class="choice-btn" style="text-align:center;background:rgba(255,204,68,0.15);border-color:#ffcc44" id="cashout-confirm-btn">🏰 Cash Out & Bank Crowns</button>
@@ -1645,7 +1748,7 @@ function updateHUD(){
     document.getElementById('hud-wave').textContent='⭐ Wave: '+wave;
     document.getElementById('hud-hp').textContent='❤️ HP: '+Math.floor(castleHP)+'/'+maxHP;
     document.getElementById('hud-ammo').textContent='🏹 Ammo: '+ammo+'/'+maxAmmo;
-    document.getElementById('hud-gold').textContent='🪙 Gold: '+gold;
+    document.getElementById('hud-gold').textContent='🪙 Coins: '+gold;
     document.getElementById('hud-bank').textContent='📚 '+currentBankName;
     let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
     document.getElementById('hud-weather').textContent = w ? w.name : '';
@@ -3254,6 +3357,7 @@ function gameLoop(time){
             if(e.x<=100){ 
                 // Incremental contact damage (scaled down)
                 castleHP-=e.dmg*0.005*waveContactDmgMult*(1-runPowerupBonuses.luckycharm); 
+                lastDamageSource = { type: e.type, flying: !!e.flying, method: 'contact' };
                 if(e.x<=70){ 
                     // Direct impact / explosive break on reach
                     let fullDmg = 20; // goblin
@@ -3280,6 +3384,7 @@ function gameLoop(time){
                     if(e.type==='stoneburrower') fullDmg = 28;
                     if(e.type==='graveworm') fullDmg = 32;
                     castleHP -= fullDmg*waveContactDmgMult*(1-runPowerupBonuses.luckycharm);
+                    lastDamageSource = { type: e.type, flying: !!e.flying, method: 'contact' };
                     e.dead=true; 
                 } 
             }
@@ -3452,7 +3557,12 @@ function gameLoop(time){
             lastWaveWasBoss = false;
             startBetweenWave();
         }
-        if(castleHP<=0){ castleHP=0; showGameOver(); }
+        if(castleHP<=0){
+            castleHP=0;
+            const wipe = document.getElementById('screenWipe');
+            wipe.classList.add('wipe');
+            setTimeout(()=>{ showGameOver(); wipe.classList.remove('wipe'); }, 750);
+        }
         updateHUD();
     }
 
@@ -3489,8 +3599,53 @@ function gameLoop(time){
     requestAnimationFrame(gameLoop);
 }
 
-showStart();
+const cdRestartCode = sessionStorage.getItem('cd_restart_code');
+if(cdRestartCode !== null){
+    sessionStorage.removeItem('cd_restart_code');
+    showStart();
+    const codeInput = document.getElementById('bank-code-input');
+    const startBtnEl = document.getElementById('start-btn');
+    if(codeInput && startBtnEl){
+        codeInput.value = cdRestartCode;
+        startBtnEl.click();
+    }
+} else {
+    showStart();
+}
 requestAnimationFrame(gameLoop);
+
+// Decorative background: a few idle enemy sprites drifting behind the home screen,
+// reusing the same draw functions as gameplay (purely visual, no game-state impact).
+const homeBgEnemyPool = ['goblin','skeleton','knight','wolf'];
+let homeBgEnemies = homeBgEnemyPool.map((type,i) => ({
+    type, x: 60+i*160+Math.random()*60, y: 100+Math.random()*300,
+    vx: (Math.random()-0.5)*0.6, vy: (Math.random()-0.5)*0.4,
+    dead:false, frozen:0, frame:0, frameTimer:0
+}));
+function animateHomeBg(){
+    const canvas = document.getElementById('home-bg-canvas');
+    if(canvas){
+        if(canvas.width!==canvas.clientWidth||canvas.height!==canvas.clientHeight){
+            canvas.width=canvas.clientWidth; canvas.height=canvas.clientHeight;
+        }
+        const bgCtx = canvas.getContext('2d');
+        const savedCtx = ctx;
+        ctx = bgCtx;
+        bgCtx.clearRect(0,0,canvas.width,canvas.height);
+        homeBgEnemies.forEach(e=>{
+            e.x+=e.vx; e.y+=e.vy;
+            e.frameTimer++; if(e.frameTimer>8){e.frameTimer=0;e.frame=(e.frame+1)%4;}
+            if(e.x<-40)e.x=canvas.width+20;
+            if(e.x>canvas.width+40)e.x=-20;
+            if(e.y<-40)e.y=canvas.height+20;
+            if(e.y>canvas.height+40)e.y=-20;
+            drawEnemy(e,0,0,1);
+        });
+        ctx = savedCtx;
+    }
+    requestAnimationFrame(animateHomeBg);
+}
+animateHomeBg();
 })();
   </script>
  </body>
