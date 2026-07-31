@@ -131,7 +131,7 @@ resize();
 window.addEventListener('resize', resize);
 
 let state = 'start';
-let wave = 0, castleHP = 100, maxHP = 100, ammo = 3, maxAmmo = 10, gold = 0, maxGold = 100, kills = 0;
+let wave = 0, castleHP = 100, maxHP = 100, ammo = 3, maxAmmo = 10, gold = 0, maxGold = 150, kills = 0;
 let lastDamageSource = null;
 const ENEMY_DISPLAY_NAMES = {
     goblin: 'Goblin', skeleton: 'Skeleton', knight: 'Knight', wolf: 'Wolf', siege: 'Siege Engine',
@@ -154,6 +154,26 @@ let skeletonAllies = [];
 let betweenWaveQuestions = 0, betweenWaveCorrect = 0;
 let animFrame = 0;
 let castleColor = '#555577', wallHP = 0;
+let bossWaveInterval = 5; // Short Fuse curse can drop this to 4
+// ── Curse card state ─────────────────────────────────────────────────────
+// Curses are permanent, one-time-pick downside/upside cards (see the
+// 'curse' group in allCards). Each sets one or more of these flags/values
+// when picked; the flags are read from the normal gameplay hooks below.
+let curseBrittleDmgBonus = 0;      // Brittle Foundations: +dmg%, read in recomputeGlobalMultipliers
+let curseMerchantDouble = false;   // Empty Coffers: Merchant appears twice as often
+let curseRustedRateMult = 1;       // Rusted Arsenal: tower fire rate penalty
+let curseRustedSplashMult = 1;     // Rusted Arsenal: splash radius bonus
+let curseNoKillGold = false;       // Starving Garrison: kills no longer drop gold
+let curseNoWavePreview = false;    // Cracked Bell: hides the upcoming-wave scouting panel
+let pendingGuaranteedRareCards = 0;// Cracked Bell: next N card-select screens are rare/legendary only
+let pendingGuaranteedLegendaryCards = 0; // Short Fuse: every boss kill queues one guaranteed legendary card screen
+let curseNoDefenceCards = false;   // Overgrown Walls: defence-group cards removed from the pool
+let curseBadOmenWeather = false;   // Bad Omen: weather rerolls always keep the harsher of two options
+let curseCrownBonus = 0;           // Bad Omen: +% Crowns earned at run end
+let curseThinBlood = false;        // Thin Blood: Priest/Repair Wall heals no longer stack, only the larger applies
+let curseGuaranteedLegendaryOnBoss = false; // Short Fuse: every boss kill grants a guaranteed legendary card
+let curseHollowKingdom = false;    // Hollow Crown: Kingdom meta-upgrades give 0 effect this run
+let curseFlatLevelTwo = false;     // Hollow Crown: all in-run card levels start at level 2
 let globalDmgMult = 1, globalSpeedMult = 1;
 let hasMoat = false, hasKing = false, hasDragon = false, hasMeteor = false, hasElite = false;
 let hasWizard = false, wizardTimer = 0, wizardSpellIndex = 0;
@@ -176,7 +196,8 @@ function getCardEffectMult(id){ let lvl=getCardLevel(id); return lvl>0 ? 1 + 0.5
 // card is picked, so each card's own bonus scales independently off its own
 // level rather than compounding on top of whatever order cards were picked in.
 function recomputeGlobalMultipliers(){
-    let dmgBonus = 0, speedBonus = 0;
+    let dmgBonus = curseBrittleDmgBonus;
+    let speedBonus = 0;
     if(cardLevels['servant']) dmgBonus += 1.0*getCardEffectMult('servant');   // King's Servant: +100% base
     if(cardLevels['theking']) dmgBonus += 1.0*getCardEffectMult('theking');   // The King: +100% base
     if(cardLevels['warhorn']) speedBonus += 0.3*getCardEffectMult('warhorn'); // War Horn: +30% base
@@ -236,10 +257,11 @@ function loadKingdomSave(){
                 bestWave: parsed.bestWave||0,
                 equippedPowerups: parsed.equippedPowerups||[],
                 notifiedThresholds: parsed.notifiedThresholds||[],
+                unlockedRelics: parsed.unlockedRelics||[],
             };
         }
     } catch(err){ console.warn('Kingdom save unavailable (localStorage blocked) — progress will not persist this session.', err); }
-    return { crowns:0, levels:{}, totalCorrectAnswers:0, totalKills:0, bestWave:0, equippedPowerups:[], notifiedThresholds:[] };
+    return { crowns:0, levels:{}, totalCorrectAnswers:0, totalKills:0, bestWave:0, equippedPowerups:[], notifiedThresholds:[], unlockedRelics:[] };
 }
 let kingdomStorageOk = true;
 function saveKingdomSave(){
@@ -308,7 +330,7 @@ function applyKingdomStartBonuses(){
     kingdomRateMult = Math.pow(0.99, kingdomLevel('blacksmith'));
     kingdomSplashBonusMult = 1 + 0.05*kingdomLevel('siegeengineers');
     kingdomGoldMult = 1 + 0.1*kingdomLevel('treasury');
-    kingdomHealAfterBossPct = 0.01*kingdomLevel('healers');
+    kingdomHealAfterBossPct = 0.005*kingdomLevel('healers');
     // Royal Healers also raises Necromancer's dead: +1 skeleton per 5 levels.
     kingdomHealersSkeletonBonus = Math.floor(kingdomLevel('healers')/5);
     kingdomWatchTowerLevel = kingdomLevel('watchtowers');
@@ -336,7 +358,8 @@ function applyKingdomStartBonuses(){
 // run's Golden Touch bonus (if equipped), and the gold cap — the single path
 // every gold reward goes through.
 function addGold(amount){
-    gold = Math.min(gold + Math.round(amount*kingdomGoldMult*runGoldMult*(1+merchantGoldBonus)*(1+(runPowerupBonuses.goldentouch||0))), maxGold);
+    let ironVaultMult = equippedRelics.includes('relic_ironvault') ? 0.75 : 1;
+    gold = Math.min(gold + Math.round(amount*kingdomGoldMult*runGoldMult*(1+merchantGoldBonus)*(1+(runPowerupBonuses.goldentouch||0))*ironVaultMult), maxGold);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -417,9 +440,87 @@ function toggleEquipPowerup(id){
     saveKingdomSave();
     return true;
 }
-
 let runPowerupBonuses = { luckycharm:0, stageclear:0, increasedammo:0, goldentouch:0 };
 let prerunQuizCorrect = 0, prerunQuizTimes = [];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RELICS — unlocked one at a time (randomly, from whatever's not owned yet)
+// by defeating a boss. Unlike Powerups (which stay equipped run-to-run),
+// relic loadout is chosen fresh each run, right after Press Start, via
+// showRelicSelect(). Slot count is driven by lifetime correct answers,
+// same currency as everything else in the Kingdom.
+// ═══════════════════════════════════════════════════════════════════════════
+const RELIC_DEFS = [
+    { id:'relic_kindling',   name:'🔥 Kindling Core',       desc:'Fire Mage burn ticks also scorch nearby enemies' },
+    { id:'relic_frozenheart',name:'❄️ Frozen Heart',        desc:'Frozen enemies take +50% damage from all sources' },
+    { id:'relic_bonechoir',  name:'💀 Bone Choir',          desc:'+1% global tower damage per living skeleton (stacking)' },
+    { id:'relic_coils',      name:'⚡ Overcharged Coils',    desc:'Chain Lightning gains +1 extra jump' },
+    { id:'relic_ledger',     name:"🧪 Alchemist's Ledger",  desc:"Poison's killing tick refunds 1 gold" },
+    { id:'relic_berserker',  name:"⚔️ Berserker's Oath",    desc:'Towers fire up to 40% faster the lower your castle HP is' },
+    { id:'relic_ironvault',  name:'🏦 Iron Vault',          desc:'Gold storage cap doubled, but gold gained -25%' },
+    { id:'relic_reckless',   name:'💨 Reckless Momentum',   desc:"Towers fire faster the longer a wave runs, resets each wave" },
+    { id:'relic_undying',    name:'🩸 Undying Legion',      desc:"Necromancer skeletons never expire, but capped at 3 alive at once" },
+    { id:'relic_quickdraw',  name:'🎯 Quick Draw',          desc:'Max ammo capacity -3, but Get Ammo questions pull from your easiest questions' },
+];
+const RELIC_SLOT_TIERS = [ {min:400,slots:3}, {min:200,slots:2}, {min:0,slots:1} ];
+function relicSlots(){
+    let c = kingdomSave.totalCorrectAnswers;
+    return RELIC_SLOT_TIERS.find(t=>c>=t.min).slots;
+}
+// This run's chosen loadout — reset to empty every run (fresh page load via
+// Play Again's location.reload()), populated by showRelicSelect().
+let equippedRelics = [];
+let waveFrameCount = 0; // drives Reckless Momentum; reset to 0 each startWave()
+
+// Rolls one random relic the player doesn't already own and adds it to their
+// permanent collection. Called whenever a boss dies (see applyDamageToEnemy).
+// No-ops once every relic has been unlocked.
+function unlockRandomRelic(){
+    let locked = RELIC_DEFS.filter(r => !kingdomSave.unlockedRelics.includes(r.id));
+    if(!locked.length) return;
+    let won = locked[Math.floor(Math.random()*locked.length)];
+    kingdomSave.unlockedRelics.push(won.id);
+    saveKingdomSave();
+    pendingUnlockNotifications.push(`🔮 Relic unlocked: ${won.name}!`);
+}
+
+// Run-start relic loadout screen. Only shown if the player owns at least one
+// relic; otherwise falls straight through to onComplete(). Lets the player
+// pick up to relicSlots() of their unlocked relics before the first wave.
+function showRelicSelect(onComplete){
+    if(!kingdomSave.unlockedRelics.length){ onComplete(); return; }
+    equippedRelics = [];
+    let slots = relicSlots();
+    function render(){
+        let owned = RELIC_DEFS.filter(r=>kingdomSave.unlockedRelics.includes(r.id));
+        let html = `<div class="modal-overlay"><div class="modal-box" style="text-align:center">
+            <h2 class="title-font" style="background:none;border:none;box-shadow:none;">Choose Your Relic${slots>1?'s':''}</h2>
+            <p style="margin:8px 0 16px;color:#aaa;font-size:13px">Pick up to ${slots} for this run (${equippedRelics.length}/${slots} selected).</p>`;
+        owned.forEach(r=>{
+            let isEquipped = equippedRelics.includes(r.id);
+            html += `<button class="choice-btn" data-id="${r.id}" style="${isEquipped?'background:var(--accent-rose);color:#1a0a2e;':''}"><div style="font-weight:700">${r.name}${isEquipped?' ✓':''}</div><div style="font-size:11px;color:${isEquipped?'#1a0a2e':'#aaa'};margin-top:2px">${r.desc}</div></button>`;
+        });
+        html += `<button class="choice-btn title-font" style="text-align:center;margin-top:10px;background:linear-gradient(160deg, #3d1155 0%, #240a38 100%);color:var(--accent-blue) !important;" id="relic-confirm-btn">Begin Run</button></div></div>`;
+        modalRoot.innerHTML = html;
+        modalRoot.querySelectorAll('.choice-btn[data-id]').forEach(btn=>{
+            btn.onclick = ()=>{
+                let id = btn.dataset.id;
+                let idx = equippedRelics.indexOf(id);
+                if(idx>=0) equippedRelics.splice(idx,1);
+                else if(equippedRelics.length<slots) equippedRelics.push(id);
+                render();
+            };
+        });
+        document.getElementById('relic-confirm-btn').onclick = ()=>{
+            modalRoot.innerHTML='';
+            if(equippedRelics.includes('relic_ironvault')){ maxGold*=2; }
+            if(equippedRelics.includes('relic_quickdraw')){ maxAmmo=Math.max(1,maxAmmo-3); ammo=Math.min(ammo,maxAmmo); }
+            onComplete();
+        };
+    }
+    render();
+}
+
 
 function computeRunPowerupBonuses(){
     runPowerupBonuses = { luckycharm:0, stageclear:0, increasedammo:0, goldentouch:0 };
@@ -485,10 +586,18 @@ let activeWeather = null;      // id from WEATHER_EFFECTS, or null (clear)
 let weatherWavesLeft = 0;      // waves remaining before the next re-roll
 
 function rollWeather(){
-    let ids = shuffle(WEATHER_EFFECTS.map(w=>w.id));
-    let winner = null;
-    for(let id of ids){
-        if(Math.random()*100 < weatherPity[id]){ winner = id; break; }
+    function attempt(){
+        let ids = shuffle(WEATHER_EFFECTS.map(w=>w.id));
+        for(let id of ids){ if(Math.random()*100 < weatherPity[id]) return id; }
+        return null;
+    }
+    let winner = attempt();
+    if(curseBadOmenWeather){
+        // Bad Omen curse: roll twice and keep whichever result is an actual
+        // weather effect rather than clear skies — the harsher of the two.
+        let second = attempt();
+        if(winner===null && second!==null) winner = second;
+        else if(winner!==null && second!==null) winner = Math.random()<0.5 ? winner : second;
     }
     WEATHER_EFFECTS.forEach(w=>{
         weatherPity[w.id] = (w.id===winner) ? 1 : Math.min(100, weatherPity[w.id]+1);
@@ -513,6 +622,22 @@ const AFFIX_DEFS = [
 ];
 let activeAffix = null;
 let treasureGoldBonus = 15;
+
+// ── Elite/mutator waves ─────────────────────────────────────────────────────
+// A flat 2% chance on any regular (non-boss, non-pre-boss) wave to become an
+// "Elite Wave" — a single dangerous modifier applied to every normal enemy
+// that wave. Telegraphed up front via showWaveAnnouncement so it reads as a
+// fair surprise rather than a cheap ambush. Mutually exclusive with the
+// guaranteed pre-boss AFFIX_DEFS wave, so the two systems never stack.
+const MUTATOR_DEFS = [
+    { id:'frenzied',  name:'💢 Frenzied',       desc:'Enemies move 50% faster but have 25% less health' },
+    { id:'ironclad',  name:'🛡️ Ironclad',       desc:'Enemies take 30% less tower damage but move 20% slower' },
+    { id:'splitters', name:'🧬 Splitters',      desc:'Slain enemies split into two weaker copies, once' },
+    { id:'vampiric',  name:'🩸 Vampiric',       desc:'Enemies heal off the castle while in contact' },
+    { id:'phantom',   name:'👻 Phantom',        desc:'Enemies have a chance to dodge tower hits entirely' },
+    { id:'gilded',    name:'💰 Gilded',         desc:'Enemies drop triple gold but hit 40% harder' },
+];
+let activeMutator = null;
 
 // ── Merchant risk/reward events ─────────────────────────────────────────────
 let waveGoldMult = 1, waveDmgMult = 1, waveContactDmgMult = 1;
@@ -540,8 +665,8 @@ const MERCHANT_OFFERS = [
       apply(){ maxAmmo=Math.max(1,Math.floor(maxAmmo/2)); ammo=Math.min(ammo,maxAmmo); merchantNpcDmgMult*=2; recomputeGlobalMultipliers(); } },
     { name:'Blood Moon Pact', risk:"Next wave's enemy count is doubled", reward:'This wave is instantly cleared',
       apply(){ forceNextWaveDoubleEnemies=true; skipThisWaveSpawns=true; } },
-    { name:'Desperate Gambit', risk:'Enemies deal double contact damage this wave', reward:'Castle heals to full right now',
-      apply(){ waveContactDmgMult*=2; castleHP=maxHP; } },
+    { name:'Desperate Gambit', risk:'Enemies deal double contact damage this wave', reward:'Castle heals 50% of max HP right now',
+      apply(){ waveContactDmgMult*=2; castleHP=Math.min(maxHP, castleHP+maxHP*0.5); } },
 ];
 
 // Resistance mechanic: some enemies (e.g. Leshy) are only efficiently damaged
@@ -557,19 +682,37 @@ function getResistanceMult(e, sourceId){
 // Shared damage application + death handling, used by direct hits, splash
 // damage, and poison ticks alike — so gold/kills/undead-rising are always
 // credited consistently no matter which source did the killing blow.
-function applyDamageToEnemy(e, rawDmg, sourceId){
+function applyDamageToEnemy(e, rawDmg, sourceId, viaPoisonTick){
     if(!e || e.dead) return;
+    if(activeMutator==='phantom' && Math.random()<0.25) return; // phantom enemies sometimes dodge entirely
     let dmgDealt = rawDmg * getResistanceMult(e, sourceId);
+    if(activeMutator==='ironclad') dmgDealt *= 0.7;
+    if(equippedRelics.includes('relic_frozenheart') && e.frozen>0) dmgDealt *= 1.5;
     if(e.shieldActive) dmgDealt *= (1-e.shieldReduction);
     e.hp -= dmgDealt;
     if(e.hp<=0){
         e.dead=true;
         kills++;
         let goldReward = e.isWagon ? treasureGoldBonus : 2;
+        if(activeMutator==='gilded') goldReward *= 3;
+        if(curseNoKillGold && !e.isWagon) goldReward = 0; // Starving Garrison: only wagons still pay out
+        if(viaPoisonTick && equippedRelics.includes('relic_ledger')) goldReward += 1; // Alchemist's Ledger
         addGold(goldReward*waveGoldMult);
         if(activeAffix==='undead' && e.type!=='wagon' && e.type!=='skeleton' && e.type!=='boss'){
             enemies.push(spawnEnemy('skeleton', e.x));
         }
+        if(activeMutator==='splitters' && !e.isSplitling && e.type!=='wagon' && e.type!=='boss'){
+            for(let i=0;i<2;i++){
+                let clone = spawnEnemy(e.type, e.x + (Math.random()-0.5)*10);
+                clone.y = e.y;
+                clone.hp = Math.max(1, Math.round(clone.maxHp*0.4));
+                clone.maxHp = clone.hp;
+                clone.isSplitling = true;
+                enemies.push(clone);
+            }
+        }
+        if(e.type==='boss' && curseGuaranteedLegendaryOnBoss) pendingGuaranteedLegendaryCards++;
+        if(e.type==='boss') unlockRandomRelic();
     }
 }
 
@@ -597,7 +740,15 @@ let currentBankCode = '';
 // are proportionally more likely to come up again, questions answered right
 // recently are proportionally less likely, so practice naturally concentrates
 // on whatever a student is actually struggling with.
-function randQ() {
+function randQ(preferEasy) {
+    if(preferEasy){
+        // Quick Draw relic: pull from the easiest ~30% of the bank (lowest
+        // weight = most reliably answered correctly recently) instead of
+        // the full weighted pool.
+        let sorted = [...questions].sort((a,b)=>(a.weight??1)-(b.weight??1));
+        let easyPool = sorted.slice(0, Math.max(3, Math.ceil(sorted.length*0.3)));
+        return easyPool[Math.floor(Math.random()*easyPool.length)];
+    }
     let totalWeight = questions.reduce((sum,q)=> sum + (q.weight??1), 0);
     let r = Math.random()*totalWeight;
     for(let q of questions){
@@ -618,22 +769,23 @@ function adjustQuestionWeight(q, wasCorrect){
 
 // ── Teacher setup ──────────────────────────────────────────────────────────
 // These are the codes students/teachers type on the title screen, mapped to a
-// JSON file in the question-banks/ folder and a display name for the HUD.
+// JSON file in the question-banks/ folder.
 // To add a new subject: 1) drop a new JSON file (same format as the existing
 // ones) into question-banks/, 2) add one line below. No other code changes needed.
 // Suggested code format: <year><term><subject initial><detail>, e.g. Year 9
 // biology, term 3, full bank = "93bf"; Year 9 physics, speed topic = "92ps".
 const QUESTION_BANK_FILES = {
-    '93bf': { file:'question-banks/year-9-biology-full.json', name:'Year 9 Biology' },
-    '92ps': { file:'question-banks/year-9-physics-speed.json',  name:'Year 9 Physics - Speed' },
-    '92pf': { file:'question-banks/year-9-physics-force.json',  name:'Year 9 Physics - Force' },
-    '112cf': { file:'question-banks/year-11-chemistry-full.json', name:'Year 11 Chemistry' },
-    '11-13dc': { file:'question-banks/senior-dance-choreography.json', name:'Senior Dance Choreography' },
-    '11-13dg': { file:'question-banks/senior-dance-genres.json', name:'Senior Dance Genres' },
-    'science': { file:'question-banks/year-9-science-full.json', name:'Science Quiz' },
-    'elfdef':{ file:'question-banks/englishlanguagedef.json',name:'English Language Features Definitions' },
-    'chef': { file:'question-banks/cooking.json', name:'Cooking'},
-    'elfex': { file:'question-banks/englishlanguageex.json', name:'English Language Features Examples'},
+    '93bf':'question-banks/year-9-biology-full.json',
+    '92ps':'question-banks/year-9-physics-speed.json',
+    '92pf':'question-banks/year-9-physics-force.json',
+    'test':'question-banks/devtestquestions.json',
+    '112cf':'question-banks/year-11-chemistry-full.json',
+    '11-13dc':'question-banks/senior-dance-choreography.json',
+    '11-13dg':'question-banks/senior-dance-genres.json',
+    'science':'question-banks/year-9-science-full.json',
+    'chef':'question-banks/cooking.json',
+    'elfdef':'question-banks/englishlanguagedef.json',
+    'elfex':'question-banks/englishlanguageex.json',
 };
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -644,15 +796,15 @@ const QUESTION_BANK_FILES = {
 async function loadQuestionBank(code) {
     code = (code||'').trim().toLowerCase();
     if(!code) return { ok:false, error:'code-required' };
-    const entry = QUESTION_BANK_FILES[code];
-    if(!entry) return { ok:false, error:'code-not-found' };
+    const file = QUESTION_BANK_FILES[code];
+    if(!file) return { ok:false, error:'code-not-found' };
     try {
-        const bankRes = await fetch(entry.file, {cache:'no-store'});
+        const bankRes = await fetch(file, {cache:'no-store'});
         if(!bankRes.ok) throw new Error('bank fetch failed');
         const bankData = await bankRes.json();
         if(!Array.isArray(bankData) || bankData.length===0) throw new Error('empty bank');
         questions = bankData.map(item => ({ q:item.q, a:item.o, c:item.a, weight:1 }));
-        currentBankName = entry.name || code.toUpperCase();
+        currentBankName = code.toUpperCase();
         currentBankCode = code;
         return { ok:true, name: currentBankName };
     } catch(err) {
@@ -725,7 +877,7 @@ const allCards = [
     {id:'goldmine',name:'💰 Coin Mine',desc:'+5 coins per wave',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:8},
     {id:'storehouse',name:'🏦 Storehouse',desc:'+5 max ammo, +50 max coins',type:'economy',group:'economy',groupWeight:20,cardWeight:45,unlockAt:0},
     {id:'merchant',name:'🛒 Merchant',desc:'+20% coins earned',type:'economy',group:'economy',groupWeight:20,cardWeight:10,unlockAt:26},
-    {id:'repair',name:'🧱 Repair Wall',desc:'Heal 10 HP per wave',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:10},
+    {id:'repair',name:'🧱 Repair Wall',desc:'Heal 5 HP per wave',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:10},
     {id:'stonewalls',name:'🛡️ Stone Walls',desc:'+30 max HP',type:'defence',group:'defence',groupWeight:10,cardWeight:40,unlockAt:16},
     {id:'moat',name:'🌊 Moat',desc:'Slows enemies',type:'defence',group:'defence',groupWeight:10,cardWeight:30,unlockAt:0},
     {id:'servant',name:'👑 King\'s Servant',desc:'+100% damage',type:'buff',group:'buff',groupWeight:6,cardWeight:20,unlockAt:44},
@@ -741,6 +893,19 @@ const allCards = [
     {id:'elite',name:'⚔️ Elite Warriors',desc:'Triple spread shot',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:105},
     {id:'meteor_card',name:'☄️ Meteor',desc:'Periodically strikes the strongest enemy with a splash impact',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:120},
     {id:'theking',name:'👑 The King',desc:'Massive global buff',type:'legendary',group:'legendary',groupWeight:1,cardWeight:25,unlockAt:140},
+    // ── Curse cards — permanent downside + upside, offered like any other
+    // card but removed from the pool for the rest of the run once picked
+    // (see getUnlockedCards). A deliberate gamble, not a random punishment.
+    {id:'curse_brittle',   name:'🏚️ Brittle Foundations', desc:'Castle max HP -20% (permanent). Towers deal +25% damage (permanent)', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_coffers',   name:'🪙 Empty Coffers',        desc:'Gold storage cap -30% (permanent). Merchant appears twice as often', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_rusted',    name:'🔧 Rusted Arsenal',       desc:'All towers fire 15% slower. Splash radius +40%', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_starving',  name:'🍞 Starving Garrison',    desc:'Enemy kills no longer drop gold (coin wagons still do). Correct answers award double ammo', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_bell',      name:'🔔 Cracked Bell',         desc:"Upcoming wave composition is hidden. Next 3 card offers are guaranteed rare or better", type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_overgrown', name:'🌿 Overgrown Walls',      desc:'Defence cards (walls, moat, repair) removed from the pool. One random tower\'s range is permanently doubled', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_omen',      name:'🔮 Bad Omen',             desc:'Weather always rolls the harsher of two options. Crowns earned +20% this run', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_thinblood', name:'🩹 Thin Blood',           desc:"Repair Wall and Priest heals no longer stack — only the larger applies. Max ammo capacity +50% immediately", type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_shortfuse', name:'⏱️ Short Fuse',           desc:'Boss waves now arrive every 4 waves instead of 5. Every boss kill grants a guaranteed legendary card', type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
+    {id:'curse_hollow',    name:'👑 Hollow Crown',         desc:"Kingdom upgrades give no bonus for the rest of this run. Every card level you already have (and your next new card) starts at level 2", type:'curse', group:'curse', groupWeight:4, cardWeight:15, unlockAt:6},
 ];
 
 // Tower upgrade cycle definitions
@@ -757,11 +922,30 @@ const towerUpgradeCycles = {
 // Only cards the player has unlocked (see allCards[].unlockAt and
 // checkCardUnlocks) can ever be drawn into a card-selection screen.
 function getUnlockedCards(){
-    return allCards.filter(c => (c.unlockAt||0) <= kingdomSave.totalCorrectAnswers);
+    return allCards.filter(c => (c.unlockAt||0) <= kingdomSave.totalCorrectAnswers)
+        // Curses are a one-time pick each — once taken, they drop out of the
+        // pool for the rest of the run instead of stacking like normal cards.
+        .filter(c => c.type!=='curse' || !cardLevels[c.id])
+        // Overgrown Walls curse: defence-type cards (walls/moat/repair) are
+        // off the table for the rest of the run.
+        .filter(c => !(curseNoDefenceCards && c.group==='defence'));
 }
 
 function pickCards(n) {
     let pool = getUnlockedCards();
+    // Short Fuse curse: a boss kill queues one guaranteed-legendary screen
+    // (falls back to rare, then to the unrestricted pool, if nothing higher
+    // is unlocked yet). Takes priority over Cracked Bell's rare guarantee.
+    if(pendingGuaranteedLegendaryCards>0){
+        pendingGuaranteedLegendaryCards--;
+        let legendaryPool = pool.filter(c=>c.group==='legendary');
+        let rarePool = pool.filter(c=>c.group==='rare'||c.group==='legendary');
+        pool = legendaryPool.length ? legendaryPool : (rarePool.length ? rarePool : pool);
+    } else if(pendingGuaranteedRareCards>0){
+        pendingGuaranteedRareCards--;
+        let rarePool = pool.filter(c=>c.group==='rare'||c.group==='legendary');
+        if(rarePool.length) pool = rarePool;
+    }
     let picked = [];
     let guard = 0;
     while(picked.length < n && picked.length < pool.length && guard < 500){
@@ -828,13 +1012,16 @@ function applyCard(card) {
     // scales off getCardEffectMult(card.id) — 1x on first pick, 1.5x on the
     // second, 2.25x on the third, etc. Recomputed fresh each time (not
     // multiplied in place) so order-of-pickup never matters.
+    // Hollow Crown curse: any card's first-ever pick starts at level 2 instead of 1.
+    let wasUnpicked = !cardLevels[card.id];
     cardLevels[card.id] = (cardLevels[card.id]||0) + 1;
+    if(curseFlatLevelTwo && wasUnpicked && card.type!=='curse') cardLevels[card.id] = 2;
     cards.push({...card, level:cardLevels[card.id]});
     let m = getCardEffectMult(card.id);
 
     if(card.id==='goldmine') goldMines = 1; // presence flag; magnitude read via getCardEffectMult at wave start
     if(card.id==='storehouse'){ maxAmmo+=Math.round(5*m); maxGold+=Math.round(50*m); }
-    if(card.id==='repair') wallHP+=Math.round(10*m);
+    if(card.id==='repair') wallHP+=Math.round(5*m);
     if(card.id==='stonewalls'){ let bonus=Math.round(30*m); maxHPBeforeKeep+=bonus; recomputeMaxHP(); castleColor='#667799'; }
     if(card.id==='moat') hasMoat=true; // magnitude (slow strength) read via getCardEffectMult('moat') where the slow is applied
     if(card.id==='priest') priestHeal=true; // magnitude read via getCardEffectMult('priest') at heal time
@@ -845,9 +1032,62 @@ function applyCard(card) {
     if(card.id==='meteor_card') hasMeteor=true; // magnitude read via getCardEffectMult('meteor_card') on impact
     if(card.id==='theking') hasKing=true;
     if(card.id==='twinfate') pendingDoubleNextCard = true; // consumed by the next card the player picks, see showCardSelect's click handler
+
+    // ── Curse cards — permanent downside + upside, one-time pick each ──────
+    if(card.id==='curse_brittle'){
+        maxHPBeforeKeep=Math.max(10,Math.round(maxHPBeforeKeep*0.8)); recomputeMaxHP();
+        curseBrittleDmgBonus += 0.25;
+    }
+    if(card.id==='curse_coffers'){
+        maxGold=Math.max(10,Math.round(maxGold*0.7)); gold=Math.min(gold,maxGold);
+        curseMerchantDouble=true;
+    }
+    if(card.id==='curse_rusted'){
+        curseRustedRateMult *= 1.15;
+        curseRustedSplashMult *= 1.4;
+    }
+    if(card.id==='curse_starving'){
+        curseNoKillGold=true;
+        ammoPerCorrect*=2;
+    }
+    if(card.id==='curse_bell'){
+        curseNoWavePreview=true;
+        pendingGuaranteedRareCards+=3;
+    }
+    if(card.id==='curse_overgrown'){
+        curseNoDefenceCards=true;
+        if(towers.length){
+            let t=towers[Math.floor(Math.random()*towers.length)];
+            t.rangePercent=Math.min(100,Math.round(t.rangePercent*2));
+            t.range=Math.floor(t.rangePercent*GAME_W/100);
+        }
+    }
+    if(card.id==='curse_omen'){
+        curseBadOmenWeather=true;
+        curseCrownBonus += 0.2;
+    }
+    if(card.id==='curse_thinblood'){
+        curseThinBlood=true;
+        maxAmmo=Math.round(maxAmmo*1.5);
+    }
+    if(card.id==='curse_shortfuse'){
+        bossWaveInterval=4;
+        curseGuaranteedLegendaryOnBoss=true;
+    }
+    if(card.id==='curse_hollow'){
+        curseHollowKingdom=true;
+        kingdomDmgBonusArcherAxe=0; kingdomEffectDurationMult=1; kingdomRateMult=1; kingdomSplashBonusMult=1;
+        kingdomGoldMult=1; kingdomHealAfterBossPct=0; kingdomHealersSkeletonBonus=0; kingdomWatchTowerLevel=0;
+        kingdomStudyHallLevel=0; kingdomApprenticeshipLevel=0; kingdomLibraryLevel=0; kingdomAcademyLevel=0;
+        curseFlatLevelTwo=true;
+        Object.keys(cardLevels).forEach(id=>{ if(cardLevels[id]>0 && cardLevels[id]<2) cardLevels[id]=2; });
+        recomputeMaxHP();
+    }
+
     recomputeGlobalMultipliers();
 }
 
+const QUIET_TOWERSCALE_TYPES = ['skeleton','wolf_dire','irongolem','wyvern'];
 function spawnEnemy(type, x) {
     let e = {x: x||GAME_W+10, y: 225+Math.random()*20, type, frame:0, frameTimer:0, hp:10, maxHp:10, speed:0.4, dmg:5, frozen:0, dead:false, deathTimer:0};
     // Goblin and Skeleton counts already grow with wave² (see ENEMY_SPAWN_TABLE)
@@ -876,6 +1116,15 @@ function spawnEnemy(type, x) {
     if(type==='wyvern'){e.hp=34+wave*4;e.speed=0.22;e.dmg=9+Math.floor(wave/8);e.flying=true;}
     if(type==='stoneburrower'){e.hp=40+wave*5;e.speed=0.18;e.dmg=6+Math.floor(wave/12);e.underground=true;}
     if(type==='graveworm'){e.hp=18+wave*2.5;e.speed=0.16;e.dmg=11+Math.floor(wave/6);e.underground=true;}
+    // Quiet difficulty valve: a few enemy types get tougher the more towers
+    // the player has built, so a maxed-out base isn't a free pass to coast.
+    // Not surfaced anywhere in the UI/tooltips — it should read as "the game
+    // is scaling up", not as a named penalty for building towers.
+    if(QUIET_TOWERSCALE_TYPES.includes(type)){
+        e.hp = Math.round(e.hp * (1 + towers.length*0.06));
+    }
+    if(activeMutator==='frenzied' && type!=='wagon'){ e.hp=Math.max(1,Math.round(e.hp*0.75)); e.speed*=1.5; }
+    if(activeMutator==='ironclad' && type!=='wagon'){ e.speed*=0.8; }
     if(type==='boss'){
         let def = currentBossDef || bossDefs[0];
         // Base numbers bumped up across the board, and damage/speed now scale
@@ -1063,13 +1312,21 @@ function startWave() {
     wave++;
     if(runPowerupBonuses.stageclear>0) addGold(runPowerupBonuses.stageclear);
     if(goldMines) addGold(Math.round(5*getCardEffectMult('goldmine')));
-    if(wallHP>0) castleHP=Math.min(castleHP+wallHP, maxHP);
-    if(priestHeal) castleHP=Math.min(castleHP+Math.round(5*getCardEffectMult('priest')), maxHP);
+    let priestHealAmt = priestHeal ? Math.round(2.5*getCardEffectMult('priest')) : 0;
+    if(curseThinBlood){
+        let bestHeal = Math.max(wallHP, priestHealAmt);
+        if(bestHeal>0) castleHP=Math.min(castleHP+bestHeal, maxHP);
+    } else {
+        if(wallHP>0) castleHP=Math.min(castleHP+wallHP, maxHP);
+        if(priestHealAmt>0) castleHP=Math.min(castleHP+priestHealAmt, maxHP);
+    }
     spawnQueue=[];
     waveGoldMult=1; waveDmgMult=1; waveContactDmgMult=1;
     activeAffix=null;
+    activeMutator=null;
+    waveFrameCount=0;
 
-    let isBossWave = (wave%5===0) || forceBossThisWave;
+    let isBossWave = (wave%bossWaveInterval===0) || forceBossThisWave;
     forceBossThisWave=false;
     lastWaveWasBoss = isBossWave;
 
@@ -1087,9 +1344,11 @@ function startWave() {
 
     if(isBossWave){ showBoss(); return; }
 
-    let isPreBoss = (wave+1)%5===0;
+    let isPreBoss = (wave+1)%bossWaveInterval===0;
     if(isPreBoss) activeAffix = AFFIX_DEFS[Math.floor(Math.random()*AFFIX_DEFS.length)].id;
+    else if(Math.random() < 0.02) activeMutator = MUTATOR_DEFS[Math.floor(Math.random()*MUTATOR_DEFS.length)].id;
     if(activeAffix==='cindermarch') waveContactDmgMult *= 1.5; // fire-touched enemies hit harder up close
+    if(activeMutator==='gilded') waveContactDmgMult *= 1.4; // gilded enemies hit harder in exchange for triple gold
 
     let doubleEnemies = forceNextWaveDoubleEnemies || runDoubleEnemies;
     forceNextWaveDoubleEnemies=false;
@@ -1098,8 +1357,9 @@ function startWave() {
     if(skipThisWaveSpawns){ skipThisWaveSpawns=false; spawnQueue=[]; }
 
     let affixDef = AFFIX_DEFS.find(a=>a.id===activeAffix);
-    if(weatherChanged || affixDef){
-        showWaveAnnouncement(weatherChanged, affixDef);
+    let mutatorDef = MUTATOR_DEFS.find(m=>m.id===activeMutator);
+    if(weatherChanged || affixDef || mutatorDef){
+        showWaveAnnouncement(weatherChanged, affixDef, mutatorDef);
     } else {
         state='playing'; spawnTimer=0; updateHUD();
     }
@@ -1159,7 +1419,7 @@ function buildWaveComposition(doubleEnemies){
     shuffle(spawnQueue);
 }
 
-function showWaveAnnouncement(weatherChanged, affixDef){
+function showWaveAnnouncement(weatherChanged, affixDef, mutatorDef){
     state='boss'; // reuse the same input-blocking state as the boss splash
     let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
     let html = `<div class="boss-splash"><div style="font-size:14px;letter-spacing:8px">═══════════════════</div>`;
@@ -1169,6 +1429,9 @@ function showWaveAnnouncement(weatherChanged, affixDef){
     }
     if(affixDef){
         html += `<div style="font-size:24px;margin:12px 0">${affixDef.name}</div><div style="font-size:13px;color:#ffaacc">${affixDef.desc}</div>`;
+    }
+    if(mutatorDef){
+        html += `<div style="font-size:15px;letter-spacing:4px;color:#e94560;margin-top:6px">⚠️ ELITE WAVE ⚠️</div><div style="font-size:24px;margin:12px 0">${mutatorDef.name}</div><div style="font-size:13px;color:#ffaacc">${mutatorDef.desc}</div>`;
     }
     html += `<div style="font-size:14px;letter-spacing:8px;margin-top:12px">═══════════════════</div></div>`;
     modalRoot.innerHTML=html;
@@ -1210,10 +1473,10 @@ function startBetweenWave(){
         if(towerCards.length) applyCard(towerCards[Math.floor(Math.random()*towerCards.length)]);
     }
     let nextWave = wave+1;
-    let nextIsBoss = nextWave%5===0;
+    let nextIsBoss = nextWave%bossWaveInterval===0;
     let merchantAppears;
     if(pendingMerchantRoll!==null){ merchantAppears = pendingMerchantRoll; pendingMerchantRoll=null; }
-    else { merchantAppears = !nextIsBoss && Math.random()<0.05; }
+    else { merchantAppears = !nextIsBoss && Math.random()<(0.05*(curseMerchantDouble?2:1)); }
     if(!nextIsBoss && merchantAppears){
         showMerchant(()=>{ betweenWaveQuestions=0; betweenWaveCorrect=0; askBetweenQuestion(); });
     } else {
@@ -1347,7 +1610,7 @@ function showCardSelect(){
     // flying/underground trait that only half the roster can hit — so the
     // player knows what to have built before either kind arrives.
     let nextWave = wave+1;
-    let upcoming = ENEMY_SPAWN_TABLE.filter(spec => spec.unlock>nextWave && spec.unlock-nextWave<=5 && (ENEMY_SINGLE_COUNTER[spec.type] || ENEMY_TRAIT_INFO[spec.type]))
+    let upcoming = curseNoWavePreview ? [] : ENEMY_SPAWN_TABLE.filter(spec => spec.unlock>nextWave && spec.unlock-nextWave<=5 && (ENEMY_SINGLE_COUNTER[spec.type] || ENEMY_TRAIT_INFO[spec.type]))
         .sort((a,b)=>a.unlock-b.unlock);
     if(upcoming.length){
         html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #443;font-size:11px;color:#aaa">`;
@@ -1374,7 +1637,7 @@ function showCardSelect(){
 
     // Watch Towers: scout report on what's ahead, unlocked in stages.
     if(kingdomWatchTowerLevel>=1){
-        let nextIsBoss = nextWave%5===0;
+        let nextIsBoss = nextWave%bossWaveInterval===0;
         html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #445;font-size:11px;color:#8cf">🔭 Scout report:</div>`;
         if(nextIsBoss){
             html += `<div style="font-size:11px;color:#aaa">A boss looms over the next wave.</div>`;
@@ -1386,7 +1649,7 @@ function showCardSelect(){
         }
         if(kingdomWatchTowerLevel>=2){
             if(pendingMerchantRoll===null){
-                let nextNextIsBoss = (nextWave+1)%5===0;
+                let nextNextIsBoss = (nextWave+1)%bossWaveInterval===0;
                 pendingMerchantRoll = nextNextIsBoss ? false : (Math.random()<0.05);
             }
             html += `<div style="font-size:11px;color:#aaa">${pendingMerchantRoll ? '🧙 A merchant will be waiting after this wave.' : 'No merchant sighted for a while yet.'}</div>`;
@@ -1423,7 +1686,7 @@ function showCardSelect(){
 function showQuestion(){
     if(state!=='playing') return;
     state='question';
-    let q=randQ();
+    let q=randQ(equippedRelics.includes('relic_quickdraw'));
     let shuffled = q.a.map((a,i)=>({text:a,correct:i===q.c})).sort(()=>Math.random()-0.5);
     let html=`<div class="modal-overlay"><div class="modal-box question-modal"><h2 class="title-font" style="background:none;border:none;box-shadow:none;">Answer for Ammo!</h2><p style="margin-bottom:16px;font-size:clamp(15px,2.4vw,20px)">${q.q}</p><p style="color:var(--accent-pink);margin-bottom:16px;font-weight:700;font-size:clamp(12px,2vw,14px)">⚠️ Warning: Incorrect answers deal 1 damage to your Castle!</p>`;
     shuffled.forEach((a,i)=>{ html+=`<button class="choice-btn" data-correct="${a.correct}">${a.text}</button>`; });
@@ -1633,7 +1896,7 @@ function showStart(){
         if(result.ok){
             modalRoot.innerHTML='';
             applyKingdomStartBonuses();
-            runPrerunQuiz(()=> startBetweenWave());
+            showRelicSelect(()=> runPrerunQuiz(()=> startBetweenWave()));
         } else {
             startBtn.disabled = false;
             startBtn.textContent = '⚔️ START GAME';
@@ -1655,7 +1918,7 @@ function showGameOver(voluntary){
     if(voluntary!==undefined) lastRunWasVoluntary = voluntary; // remembered so returning from The Kingdom keeps the right framing
     state='gameover';
     if(!gameOverCrownsAwarded){
-        lastCrownsEarned = Math.floor(wave*3 + kills*0.2 + gold*0.05);
+        lastCrownsEarned = Math.floor((wave*3 + kills*0.2 + gold*0.05) * (1+curseCrownBonus));
         kingdomSave.crowns += lastCrownsEarned;
         kingdomSave.totalKills = (kingdomSave.totalKills||0) + kills;
         kingdomSave.bestWave = Math.max(kingdomSave.bestWave||0, wave);
@@ -1751,7 +2014,8 @@ function updateHUD(){
     document.getElementById('hud-gold').textContent='🪙 Coins: '+gold;
     document.getElementById('hud-bank').textContent='📚 '+currentBankName;
     let w = WEATHER_EFFECTS.find(x=>x.id===activeWeather);
-    document.getElementById('hud-weather').textContent = w ? w.name : '';
+    let m = MUTATOR_DEFS.find(x=>x.id===activeMutator);
+    document.getElementById('hud-weather').textContent = m ? ('⚠️ '+m.name) : (w ? w.name : '');
     // Gold income is wasted once you're capped — surface the option to bank
     // what you've got into Crowns now instead of continuing to overflow it.
     let cashoutBtn = document.getElementById('cashout-btn');
@@ -2376,33 +2640,140 @@ function drawEnemy(e, ox, oy, s){
     let frozen=e.frozen>0;
 
     if(e.type==='goblin'){
-        ctx.fillStyle=frozen?'#6bb0e0':'#3a6a2a';
-        ctx.fillRect(ex+1, ey+bob+1, 10*s, 12*s); // shadow/outline layer
-        ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
-        ctx.fillRect(ex+2, (ey+bob+2), 8*s, 10*s);
+        // Scale the whole sprite up 25% around its rough visual center, so
+        // all the coordinates below stay exactly as authored.
+        ctx.save();
+        ctx.translate(ex+6, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+6), -(ey+bob+5));
+
+        // Ground contact shadow
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+5.5, ey+bob+15.5, 5*s, 1.5*s, 0, 0, Math.PI*2); ctx.fill();
+
+        // Tattered cloak flaps behind the body, swaying with the walk cycle
+        ctx.fillStyle=frozen?'#3a6580':'#1e3a14';
+        ctx.beginPath();
+        ctx.moveTo(ex+2.5, ey+bob+3);
+        ctx.lineTo(ex+1-legOff*0.15, ey+bob+13);
+        ctx.lineTo(ex+3.2, ey+bob+12);
+        ctx.closePath(); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(ex+9.5, ey+bob+3);
+        ctx.lineTo(ex+11+legOff*0.15, ey+bob+13);
+        ctx.lineTo(ex+8.8, ey+bob+12);
+        ctx.closePath(); ctx.fill();
+
+        // Legs — separate thigh + boot per leg, opposite phase for a walk cycle
+        ctx.fillStyle=frozen?'#4a7a9a':'#2a4a1a';
+        ctx.fillRect(ex+2+legOff*0.3, ey+bob+10, 2.6*s, 5*s); // left thigh
+        ctx.fillRect(ex+7-legOff*0.3, ey+bob+10, 2.6*s, 5*s); // right thigh
+        ctx.fillStyle='rgba(255,255,255,0.12)';
+        ctx.fillRect(ex+2.2+legOff*0.3, ey+bob+10, 0.7*s, 4.5*s); // thigh highlight
+        ctx.fillRect(ex+7.2-legOff*0.3, ey+bob+10, 0.7*s, 4.5*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#221b10';
+        ctx.fillRect(ex+1.7+legOff*0.3, ey+bob+13.5, 3.2*s, 2.5*s); // left boot
+        ctx.fillRect(ex+6.7-legOff*0.3, ey+bob+13.5, 3.2*s, 2.5*s); // right boot
+        ctx.fillStyle='rgba(0,0,0,0.3)';
+        ctx.fillRect(ex+1.7+legOff*0.3, ey+bob+13.5, 3.2*s, 0.8*s); // boot cuff shadow
+        ctx.fillRect(ex+6.7-legOff*0.3, ey+bob+13.5, 3.2*s, 0.8*s);
+        ctx.fillStyle='#111';
+        ctx.beginPath(); ctx.moveTo(ex+1.7+legOff*0.3,ey+bob+16); ctx.lineTo(ex+1.3+legOff*0.3,ey+bob+16.9); ctx.lineTo(ex+2.3+legOff*0.3,ey+bob+16); ctx.fill(); // toe claw
+        ctx.beginPath(); ctx.moveTo(ex+9.9-legOff*0.3,ey+bob+16); ctx.lineTo(ex+9.5-legOff*0.3,ey+bob+16.9); ctx.lineTo(ex+10.5-legOff*0.3,ey+bob+16); ctx.fill();
+
+        // Torso — layered outline/base/highlight/shadow for real volume
+        ctx.fillStyle=frozen?'#5a8fb0':'#233d18'; // outline
+        ctx.fillRect(ex+1, ey+bob+1, 10*s, 11*s);
+        ctx.fillStyle=frozen?'#79b3d6':'#37662a'; // base
+        ctx.fillRect(ex+2, ey+bob+2, 8*s, 9*s);
+        ctx.fillStyle='rgba(255,255,255,0.16)';
+        ctx.fillRect(ex+2.5, ey+bob+2.5, 2.4*s, 7.5*s); // sheen
+        ctx.fillStyle='rgba(0,0,0,0.18)';
+        ctx.fillRect(ex+7.5, ey+bob+2.5, 1.5*s, 7.5*s); // shadow side
+        ctx.fillStyle='rgba(0,0,0,0.12)';
+        ctx.fillRect(ex+4.6, ey+bob+3, 0.5*s, 8*s); // sternum crease
+
+        // Leather harness strap with a buckle, plus belt, hip pouch, and a bone charm
+        ctx.strokeStyle='#5a3a1f';
+        ctx.lineWidth=Math.max(1,1.4*s);
+        ctx.beginPath(); ctx.moveTo(ex+2.5,ey+bob+2.5); ctx.lineTo(ex+8.5,ey+bob+9); ctx.stroke();
+        ctx.fillStyle='#caa24a';
+        ctx.beginPath(); ctx.arc(ex+5.5,ey+bob+5.8,0.9*s,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#432a14';
+        ctx.fillRect(ex+2, ey+bob+9, 8*s, 1.4*s); // belt
+        ctx.fillStyle='#5a3d1e';
+        ctx.fillRect(ex+6.3, ey+bob+9.3, 2.2*s, 2.2*s); // hip pouch
+        ctx.strokeStyle='#caa24a'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.strokeRect(ex+6.6, ey+bob+9.6, 1.6*s, 1.6*s); // pouch stitching
+        ctx.fillStyle='#e8e2c8';
+        ctx.beginPath(); ctx.arc(ex+3.4, ey+bob+11, 0.6*s, 0, Math.PI*2); ctx.fill(); // dangling bone-charm skull
+        ctx.fillStyle='#1a1108';
+        ctx.fillRect(ex+3.15, ey+bob+10.85, 0.2*s, 0.3*s);
+        ctx.fillRect(ex+3.55, ey+bob+10.85, 0.2*s, 0.3*s); // charm eye sockets
+
+        // Head — rounded ellipse silhouette instead of a flat block
+        ctx.fillStyle=frozen?'#5a8fb0':'#2f5322'; // outline
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob-4, 5*s, 4.6*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle=frozen?'#79b3d6':'#4a8038'; // base
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob-4, 4.2*s, 3.8*s, 0, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle='rgba(255,255,255,0.15)';
-        ctx.fillRect(ex+3, ey+bob+2, 3*s, 6*s); // highlight
-        ctx.fillStyle=frozen?'#88ccff':'#5aaa4a';
-        ctx.fillRect(ex+3*s,(ey+bob-5)*s, 6*s, 7*s);
-        ctx.fillStyle=frozen?'#88ccff':'#3a7a2a';
-        ctx.fillRect(ex, ey+bob-6, 3*s, 4*s);
-        ctx.fillRect(ex+9, ey+bob-6, 3*s, 4*s);
-        ctx.fillStyle='#ff0';
-        ctx.fillRect(ex+4, ey+bob-3, 2*s, 2*s);
-        ctx.fillRect(ex+7, ey+bob-3, 2*s, 2*s);
-        ctx.fillStyle='#fff';
-        ctx.fillRect(ex+4, ey+bob+1, 4*s, 1*s); // teeth
-        ctx.fillStyle='#cccccc';
-        ctx.fillRect(ex-1, ey+bob+5, 2*s, 6*s);
-        ctx.fillStyle='#eeeeee';
-        ctx.fillRect(ex-1, ey+bob+4, 2*s, 1*s); // blade glint
-        ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
-        ctx.fillRect(ex+2, ey+bob+11, 2.5*s, 2*s); // leg (torso-toned, short)
-        ctx.fillRect(ex+7.5, ey+bob+11, 2.5*s, 2*s);
-        ctx.fillStyle=frozen?'#88ccff':'#3a2a18';
-        ctx.fillRect(ex+2, ey+bob+13, 2.5*s, 2*s); // boots — distinct color so legs read separately from the torso
-        ctx.fillRect(ex+7.5, ey+bob+13, 2.5*s, 2*s);
+        ctx.beginPath(); ctx.ellipse(ex+4.5, ey+bob-4.9, 1.6*s, 2.4*s, -0.3, 0, Math.PI*2); ctx.fill(); // cheek highlight
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        ctx.beginPath(); ctx.ellipse(ex+7.8, ey+bob-3.3, 1.2*s, 2*s, 0.3, 0, Math.PI*2); ctx.fill(); // opposite cheek shadow
+
+        // Pointed ears with a pink inner tint and a rim highlight
+        ctx.fillStyle=frozen?'#79b3d6':'#3d6b2c';
+        ctx.beginPath(); ctx.moveTo(ex+1.2,ey+bob-4.5); ctx.lineTo(ex-1.6,ey+bob-7.2); ctx.lineTo(ex+2,ey+bob-2.5); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+10.8,ey+bob-4.5); ctx.lineTo(ex+13.6,ey+bob-7.2); ctx.lineTo(ex+10,ey+bob-2.5); ctx.fill();
+        ctx.fillStyle='rgba(255,150,150,0.35)';
+        ctx.beginPath(); ctx.moveTo(ex+1.4,ey+bob-4.7); ctx.lineTo(ex-0.7,ey+bob-6.5); ctx.lineTo(ex+1.9,ey+bob-3.2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+10.6,ey+bob-4.7); ctx.lineTo(ex+12.7,ey+bob-6.5); ctx.lineTo(ex+10.1,ey+bob-3.2); ctx.fill();
+
+        // Brow shadow, expressive eyes with pupils, a cheek scar, snout, and individual teeth
+        ctx.fillStyle='rgba(0,0,0,0.28)';
+        ctx.fillRect(ex+3.3, ey+bob-6, 5.4*s, 1.1*s);
+        ctx.fillStyle='#ffee33';
+        ctx.beginPath(); ctx.ellipse(ex+4.5, ey+bob-4.6, 1*s, 1.2*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(ex+7.5, ey+bob-4.6, 1*s, 1.2*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle='#241a00';
+        ctx.beginPath(); ctx.arc(ex+4.7, ey+bob-4.3, 0.45*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+7.3, ey+bob-4.3, 0.45*s, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.beginPath(); ctx.moveTo(ex+8.2,ey+bob-6); ctx.lineTo(ex+7.6,ey+bob-2.4); ctx.stroke(); // scar
+        ctx.fillStyle=frozen?'#5a8fb0':'#3d6b2c';
+        ctx.beginPath(); ctx.moveTo(ex+5.6,ey+bob-3.2); ctx.lineTo(ex+6.4,ey+bob-3.2); ctx.lineTo(ex+6,ey+bob-2.2); ctx.fill(); // nose
+        ctx.fillStyle='#1a1108';
+        ctx.fillRect(ex+4.3, ey+bob-1.9, 3.4*s, 1.1*s); // mouth cavity
+        ctx.fillStyle='#f4f0dc';
+        ctx.fillRect(ex+4.5, ey+bob-1.9, 0.8*s, 1.1*s);
+        ctx.fillRect(ex+5.6, ey+bob-1.9, 0.8*s, 1.1*s);
+        ctx.fillRect(ex+6.7, ey+bob-1.9, 0.8*s, 1.1*s); // teeth
+
+        // Weapon arm drawn last so it reads over the torso silhouette
+        ctx.fillStyle=frozen?'#79b3d6':'#3d6b2c';
+        ctx.fillRect(ex+8.4, ey+bob+3, 2.2*s, 5*s); // forearm
+        ctx.fillStyle='#432a14';
+        ctx.fillRect(ex+8.2, ey+bob+3, 2.6*s, 0.9*s); // leather wrist band
+        ctx.fillStyle='#8a8a8a';
+        ctx.fillRect(ex+9.6, ey+bob+0.5, 1.3*s, 5.5*s); // dagger blade
+        ctx.fillStyle='#e8e8e8';
+        ctx.fillRect(ex+9.8, ey+bob+0.5, 0.5*s, 5.5*s); // blade glint
+        ctx.fillStyle='#4a2f18';
+        ctx.fillRect(ex+9.4, ey+bob+5.8, 1.9*s, 1.6*s); // dagger grip
+        ctx.fillStyle='rgba(0,0,0,0.35)';
+        ctx.fillRect(ex+9.4, ey+bob+6.1, 1.9*s, 0.25*s); // grip finger notch
+        ctx.fillRect(ex+9.4, ey+bob+6.6, 1.9*s, 0.25*s); // grip finger notch
+
+        ctx.restore();
     } else if(e.type==='skeleton'){
+        ctx.save();
+        ctx.translate(ex+6, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+6), -(ey+bob+5));
+
+        ctx.fillStyle='rgba(0,0,0,0.22)';
+        ctx.beginPath(); ctx.ellipse(ex+6.5, ey+bob+18.5, 5*s, 1.5*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#bbbaa8';
         ctx.fillRect(ex+2, ey+bob+1, 9*s, 13*s); // outline layer
         ctx.fillStyle=frozen?'#88ccff':'#dddccc';
@@ -2411,111 +2782,250 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+4, ey+bob-5, 5*s, 6*s);
         ctx.fillStyle='rgba(255,255,255,0.25)';
         ctx.fillRect(ex+4, ey+bob-5, 2*s, 5*s); // skull highlight
+        ctx.fillStyle='rgba(0,0,0,0.18)';
+        ctx.fillRect(ex+4, ey+bob-5, 5*s, 1*s); // brow shadow
         ctx.fillStyle='#220000';
         ctx.fillRect(ex+5, ey+bob-3, 1*s, 2*s);
         ctx.fillRect(ex+7, ey+bob-3, 1*s, 2*s);
         ctx.fillStyle='#443300';
+        ctx.beginPath(); ctx.moveTo(ex+5.7,ey+bob-2); ctx.lineTo(ex+6.3,ey+bob-2); ctx.lineTo(ex+6,ey+bob-1); ctx.fill(); // nasal cavity
         ctx.fillRect(ex+5, ey+bob, 3*s, 1*s); // jaw line
+        ctx.strokeStyle='rgba(120,110,90,0.5)'; ctx.lineWidth=Math.max(1,0.3*s);
+        ctx.beginPath(); ctx.moveTo(ex+7.5,ey+bob-5); ctx.lineTo(ex+6.5,ey+bob-1.5); ctx.stroke(); // skull crack
         ctx.fillStyle='#bbbbaa';
         for(let r=0;r<3;r++) ctx.fillRect(ex+4, ey+bob+3+r*3, 5*s, 1*s);
         ctx.fillStyle='#999988';
         for(let r=0;r<3;r++) ctx.fillRect(ex+4, ey+bob+4+r*3, 5*s, 0.6*s); // rib shading
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        ctx.fillRect(ex+6.3, ey+bob+2, 0.5*s, 11*s); // spine centerline
         ctx.fillStyle='#666688';
         ctx.fillRect(ex-2, ey+bob+3, 4*s, 8*s);
         ctx.fillStyle='rgba(180,180,255,0.4)';
         ctx.fillRect(ex-2, ey+bob+3, 1.5*s, 8*s); // shield edge glow
+        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=Math.max(1,0.3*s);
+        ctx.beginPath(); ctx.moveTo(ex-2,ey+bob+6); ctx.lineTo(ex+2,ey+bob+6); ctx.stroke(); // shield grain
+        ctx.fillStyle='#333355';
+        ctx.beginPath(); ctx.arc(ex, ey+bob+7, 0.5*s, 0, Math.PI*2); ctx.fill(); // shield rivet
         ctx.fillStyle='#aaaacc';
         ctx.fillRect(ex+11, ey+bob, 2*s, 12*s);
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.fillRect(ex+11, ey+bob, 0.6*s, 12*s); // haft grain highlight
         ctx.fillStyle='#dddeee';
         ctx.fillRect(ex+11, ey+bob-1, 4*s, 2*s); // spear tip
         ctx.fillStyle=frozen?'#88ccff':'#ccccbb';
         ctx.fillRect(ex+4, ey+bob+13, 2*s, 5*s);
         ctx.fillRect(ex+7, ey+bob+13, 2*s, 5*s);
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.arc(ex+5, ey+bob+15.5, 0.6*s, 0, Math.PI*2); ctx.fill(); // knee joint
+        ctx.beginPath(); ctx.arc(ex+8, ey+bob+15.5, 0.6*s, 0, Math.PI*2); ctx.fill();
+
+        ctx.restore();
     } else if(e.type==='knight'){
+        ctx.save();
+        ctx.translate(ex+7, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+7), -(ey+bob+5));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+20, 6*s, 1.6*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#3f4d77';
         ctx.fillRect(ex+1, ey+bob, 12*s, 15*s); // armor outline
         ctx.fillStyle=frozen?'#88ccff':'#6677aa';
         ctx.fillRect(ex+2, ey+bob+1, 10*s, 13*s);
         ctx.fillStyle='rgba(255,255,255,0.18)';
         ctx.fillRect(ex+3, ey+bob+2, 3*s, 10*s); // chestplate highlight
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        ctx.fillRect(ex+9, ey+bob+2, 2*s, 10*s); // chestplate shadow side
+        ctx.fillStyle='#c9a13a';
+        ctx.fillRect(ex+6, ey+bob+5, 2*s, 4*s);
+        ctx.fillRect(ex+5, ey+bob+6, 4*s, 1.4*s); // cross emblem
+        ctx.fillStyle=frozen?'#7799cc':'#556699';
+        ctx.fillRect(ex, ey+bob, 3.5*s, 3*s);
+        ctx.fillRect(ex+10.5, ey+bob, 3.5*s, 3*s); // shoulder pauldrons
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.fillRect(ex, ey+bob, 3.5*s, 0.8*s);
+        ctx.fillRect(ex+10.5, ey+bob, 3.5*s, 0.8*s);
         ctx.fillStyle=frozen?'#88ccff':'#5566aa';
         ctx.fillRect(ex+3, ey+bob-6, 8*s, 8*s);
         ctx.fillStyle='#333355';
         ctx.fillRect(ex+3, ey+bob-6, 8*s, 2*s); // helmet brim shading
         ctx.fillStyle='#111';
         ctx.fillRect(ex+5, ey+bob-3, 4*s, 2*s);
+        ctx.fillStyle='rgba(120,200,255,0.4)';
+        ctx.fillRect(ex+5, ey+bob-3, 4*s, 0.5*s); // visor slit glint
+        ctx.fillStyle='#242440';
+        ctx.fillRect(ex+3, ey+bob-6, 1*s, 8*s);
+        ctx.fillRect(ex+10, ey+bob-6, 1*s, 8*s); // helmet side plates
         ctx.fillStyle='#cc2244';
         ctx.fillRect(ex+6, ey+bob-10, 3*s, 5*s);
         ctx.fillStyle='#ee5577';
         ctx.fillRect(ex+7, ey+bob-10, 1*s, 5*s); // plume highlight
+        ctx.fillStyle='rgba(255,255,255,0.3)';
+        ctx.fillRect(ex+7.3, ey+bob-10, 0.4*s, 5*s); // plume inner sheen
         ctx.fillStyle=frozen?'#88ccff':'#778bbb';
         ctx.fillRect(ex, ey+bob+1, 3*s, 5*s);
         ctx.fillRect(ex+11, ey+bob+1, 3*s, 5*s);
+        ctx.fillStyle=frozen?'#5a7aa0':'#3f4d77';
+        ctx.fillRect(ex, ey+bob+5.5, 3*s, 1.4*s);
+        ctx.fillRect(ex+11, ey+bob+5.5, 3*s, 1.4*s); // gauntlet fists
         ctx.fillStyle='#ccccdd';
         ctx.fillRect(ex+13, ey+bob-4, 2*s, 18*s);
         ctx.fillStyle='#eeeeff';
         ctx.fillRect(ex+13, ey+bob-4, 0.8*s, 18*s); // sword edge glint
         ctx.fillStyle='#aa8833';
-        ctx.fillRect(ex+12, ey+bob+2, 4*s, 2*s);
+        ctx.fillRect(ex+11.5, ey+bob+1, 5*s, 1.6*s); // crossguard
+        ctx.fillStyle='#4a2f18';
+        ctx.fillRect(ex+12, ey+bob+2, 4*s, 2*s); // grip
+        ctx.fillStyle='#e8c85a';
+        ctx.beginPath(); ctx.arc(ex+14, ey+bob+4.5, 1*s, 0, Math.PI*2); ctx.fill(); // pommel
         ctx.fillStyle=frozen?'#88ccff':'#556699';
         ctx.fillRect(ex+3, ey+bob+14, 4*s, 5*s);
         ctx.fillRect(ex+8, ey+bob+14, 4*s, 5*s);
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+3, ey+bob+18, 4*s, 1*s);
+        ctx.fillRect(ex+8, ey+bob+18, 4*s, 1*s); // greave shadow
+
+        ctx.restore();
     } else if(e.type==='wolf'){
+        ctx.save();
+        ctx.translate(ex+8, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+8), -(ey+bob+7));
+
+        ctx.fillStyle='rgba(0,0,0,0.22)';
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+16, 9*s, 1.8*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#3d3025';
         ctx.fillRect(ex+1, ey+bob+3, 16*s, 9*s); // body outline
         ctx.fillStyle=frozen?'#88ccff':'#554433';
         ctx.fillRect(ex+2, ey+bob+4, 14*s, 7*s);
         ctx.fillStyle='rgba(255,255,255,0.12)';
         ctx.fillRect(ex+2, ey+bob+4, 14*s, 2*s); // back highlight
+        ctx.fillStyle='rgba(220,200,170,0.35)';
+        ctx.fillRect(ex+3, ey+bob+8, 12*s, 2.5*s); // lighter belly fur
         ctx.fillStyle=frozen?'#88ccff':'#443322';
         for(let i=0;i<4;i++) ctx.fillRect(ex+3+i*3, ey+bob+5, 1*s, 5*s); // fur texture
+        ctx.fillStyle='#2a2015';
+        for(let i=0;i<3;i++) ctx.fillRect(ex+5+i*4, ey+bob+3, 0.8*s, 1.4*s); // spiky back fur tufts
+
+        // Head — snout, fangs, nose
         ctx.fillStyle=frozen?'#88ccff':'#665544';
         ctx.fillRect(ex-2, ey+bob+2, 6*s, 5*s);
+        ctx.fillStyle=frozen?'#88ccff':'#554433';
+        ctx.fillRect(ex-4, ey+bob+4, 3*s, 2.4*s); // snout
+        ctx.fillStyle='#1a1108';
+        ctx.fillRect(ex-4.2, ey+bob+5.8, 1.2*s, 1*s); // nose
+        ctx.fillStyle='#f4f0dc';
+        ctx.beginPath(); ctx.moveTo(ex-3.6,ey+bob+6.4); ctx.lineTo(ex-3.2,ey+bob+7.6); ctx.lineTo(ex-2.8,ey+bob+6.4); ctx.fill(); // fang
         ctx.fillStyle=frozen?'#88ccff':'#443322';
         ctx.fillRect(ex-2, ey+bob-1, 2*s, 3*s);
-        ctx.fillRect(ex+2, ey+bob-1, 2*s, 3*s);
+        ctx.fillRect(ex+2, ey+bob-1, 2*s, 3*s); // ears
+        ctx.fillStyle='rgba(255,150,150,0.3)';
+        ctx.fillRect(ex-1.6, ey+bob-0.6, 1.2*s, 2*s);
+        ctx.fillRect(ex+2.4, ey+bob-0.6, 1.2*s, 2*s); // inner-ear tint
         ctx.fillStyle='#ff3300';
         ctx.fillRect(ex-1, ey+bob+3, 2*s, 2*s);
+        ctx.fillStyle='#1a0800';
+        ctx.fillRect(ex-0.5, ey+bob+3.6, 0.8*s, 0.8*s); // pupil
         ctx.fillStyle='rgba(255,150,80,0.6)';
         ctx.fillRect(ex-1, ey+bob+3, 1*s, 1*s); // eye glint
+
+        // Legs with paw claws
         ctx.fillStyle=frozen?'#88ccff':'#443322';
         ctx.fillRect(ex+2, ey+bob+11, 2*s, 4*s);
         ctx.fillRect(ex+6, ey+bob+11, 2*s, 4*s);
         ctx.fillRect(ex+10, ey+bob+11, 2*s, 4*s);
         ctx.fillRect(ex+14, ey+bob+11, 2*s, 4*s);
+        ctx.fillStyle='#151008';
+        [2,6,10,14].forEach(px=>{
+            ctx.beginPath(); ctx.moveTo(ex+px,ey+bob+15); ctx.lineTo(ex+px-0.4,ey+bob+15.9); ctx.lineTo(ex+px+0.5,ey+bob+15); ctx.fill();
+        }); // paw claws
+
+        // Tail with a fluffy dark tip
+        ctx.fillStyle=frozen?'#88ccff':'#554433';
         ctx.fillRect(ex+16, ey+bob+2, 4*s, 2*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#2a2015';
+        ctx.beginPath(); ctx.ellipse(ex+20.5, ey+bob+2.5, 2*s, 1.6*s, 0.3, 0, Math.PI*2); ctx.fill(); // tail tuft
+
+        ctx.restore();
     } else if(e.type==='siege'){
+        ctx.save();
+        ctx.translate(ex+9, ey+bob+8);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+9), -(ey+bob+8));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+20, 12*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#453820';
         ctx.fillRect(ex-1, ey+bob-1, 24*s, 16*s); // frame outline
         ctx.fillStyle=frozen?'#88ccff':'#5a4a30';
         ctx.fillRect(ex, ey+bob, 22*s, 14*s);
         ctx.fillStyle='rgba(255,255,255,0.08)';
         for(let i=0;i<4;i++) ctx.fillRect(ex+2+i*5, ey+bob+1, 1*s, 12*s); // wood grain
+        ctx.fillStyle='#6a5638';
+        ctx.fillRect(ex, ey+bob+6, 22*s, 1.6*s);
+        ctx.fillRect(ex, ey+bob+11, 22*s, 1.6*s); // metal reinforcement bands
+        ctx.fillStyle='#c9a84a';
+        for(let i=0;i<5;i++){ ctx.beginPath(); ctx.arc(ex+2+i*5, ey+bob+6.8, 0.5*s, 0, Math.PI*2); ctx.fill(); }
+        for(let i=0;i<5;i++){ ctx.beginPath(); ctx.arc(ex+2+i*5, ey+bob+11.8, 0.5*s, 0, Math.PI*2); ctx.fill(); } // band rivets
+
         ctx.fillStyle='#3a3020';
         ctx.fillRect(ex-1, ey+bob-4, 24*s, 5*s);
         ctx.fillStyle='#8a7a4a';
         ctx.fillRect(ex-1, ey+bob-4, 24*s, 1.5*s); // roof highlight
+        ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=Math.max(1,0.4*s);
+        for(let i=0;i<6;i++){ ctx.beginPath(); ctx.moveTo(ex-1+i*4,ey+bob-3); ctx.lineTo(ex-1+i*4,ey+bob+0.5); ctx.stroke(); } // shingle rows
+
+        ctx.strokeStyle='#2a2010'; ctx.lineWidth=Math.max(1,0.5*s);
+        ctx.beginPath(); ctx.moveTo(ex-1,ey+bob+7); ctx.lineTo(ex-4,ey+bob+6.5); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex-1,ey+bob+9); ctx.lineTo(ex-4,ey+bob+8.5); ctx.stroke(); // chain links to ram head
         ctx.fillStyle='#2a2010';
         ctx.fillRect(ex-4, ey+bob+5, 10*s, 3*s);
         ctx.fillStyle='#888888';
         ctx.fillRect(ex-6, ey+bob+4, 3*s, 5*s);
         ctx.fillStyle='#cccccc';
         ctx.fillRect(ex-6, ey+bob+4, 3*s, 1*s); // ram-tip glint
-        ctx.fillStyle='#3a2a15';
-        ctx.beginPath(); ctx.arc(ex+6,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill(); // rivets
-        ctx.beginPath(); ctx.arc(ex+16,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba(0,0,0,0.3)';
+        ctx.fillRect(ex-6, ey+bob+7, 3*s, 1.4*s); // ram-tip shadow underside
+
         ctx.fillStyle='#443322';
         ctx.fillRect(ex+2, ey+bob+14, 5*s, 5*s);
         ctx.fillRect(ex+15, ey+bob+14, 5*s, 5*s);
+        ctx.fillStyle='#221a10';
+        ctx.beginPath(); ctx.arc(ex+6,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill(); // wheel hub
+        ctx.beginPath(); ctx.arc(ex+16,ey+bob+18,1.5*s,0,Math.PI*2); ctx.fill();
+        ctx.strokeStyle='#6a5638'; ctx.lineWidth=Math.max(1,0.4*s);
+        for(let a=0;a<4;a++){
+            let ang=a*Math.PI/4 + animFrame*0.05;
+            ctx.beginPath(); ctx.moveTo(ex+6,ey+bob+18); ctx.lineTo(ex+6+Math.cos(ang)*2.2*s, ey+bob+18+Math.sin(ang)*2.2*s); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex+16,ey+bob+18); ctx.lineTo(ex+16+Math.cos(ang)*2.2*s, ey+bob+18+Math.sin(ang)*2.2*s); ctx.stroke();
+        } // spinning wheel spokes
+
+        ctx.restore();
     } else if(e.type==='wagon'){
+        ctx.save();
+        ctx.translate(ex+10, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+10), -(ey+bob+5));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+10, ey+bob+18, 11*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#4a331d';
         ctx.fillRect(ex-1, ey+bob+1, 22*s, 11*s); // cart outline
         ctx.fillStyle=frozen?'#88ccff':'#6a4a2a';
         ctx.fillRect(ex, ey+bob+2, 20*s, 10*s);
+        ctx.strokeStyle='rgba(0,0,0,0.18)'; ctx.lineWidth=Math.max(1,0.4*s);
+        for(let i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(ex, ey+bob+2+i*2.5); ctx.lineTo(ex+20, ey+bob+2+i*2.5); ctx.stroke(); } // plank lines
         ctx.fillStyle=frozen?'#88ccff':'#8a6a3a';
         ctx.fillRect(ex+2, ey+bob-4, 16*s, 7*s);
         ctx.fillStyle='rgba(255,255,255,0.12)';
         ctx.fillRect(ex+2, ey+bob-4, 16*s, 2*s); // canvas highlight
+        ctx.strokeStyle='rgba(0,0,0,0.12)'; ctx.lineWidth=Math.max(1,0.4*s);
+        for(let i=1;i<4;i++){ ctx.beginPath(); ctx.moveTo(ex+2+i*4,ey+bob-4); ctx.lineTo(ex+1+i*4,ey+bob+2); ctx.stroke(); } // tarp folds
+
         ctx.fillStyle='#ffcc00';
         ctx.fillRect(ex+5, ey+bob-2, 4*s, 4*s);
         ctx.fillRect(ex+11, ey+bob-2, 4*s, 4*s);
@@ -2524,9 +3034,18 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+11, ey+bob-2, 1.5*s, 1.5*s);
         ctx.fillStyle='#e8d060';
         ctx.fillRect(ex+8, ey+bob-6, 4*s, 3*s);
+        ctx.fillStyle='#4a2f18';
+        ctx.fillRect(ex+15.5, ey+bob-3, 4*s, 3.5*s); // small treasure chest
+        ctx.fillStyle='#c9a24a';
+        ctx.fillRect(ex+15.5, ey+bob-1.6, 4*s, 0.8*s);
+        ctx.beginPath(); ctx.arc(ex+17.5, ey+bob-1.6, 0.5*s, 0, Math.PI*2); ctx.fill(); // chest latch
+
         ctx.fillStyle='#3a2a18';
         ctx.beginPath(); ctx.arc(ex+4, ey+bob+13, 4*s, 0, Math.PI*2); ctx.fill();
         ctx.beginPath(); ctx.arc(ex+16, ey+bob+13, 4*s, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle='rgba(180,140,70,0.4)'; ctx.lineWidth=Math.max(1,0.5*s);
+        ctx.beginPath(); ctx.arc(ex+4, ey+bob+13, 3.5*s, 0, Math.PI*2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(ex+16, ey+bob+13, 3.5*s, 0, Math.PI*2); ctx.stroke(); // wheel rim highlight
         ctx.fillStyle='#c8a838';
         ctx.beginPath(); ctx.arc(ex+4, ey+bob+13, 1.5*s, 0, Math.PI*2); ctx.fill();
         ctx.beginPath(); ctx.arc(ex+16, ey+bob+13, 1.5*s, 0, Math.PI*2); ctx.fill();
@@ -2537,27 +3056,67 @@ function drawEnemy(e, ox, oy, s){
             ctx.beginPath(); ctx.moveTo(ex+4,ey+bob+13); ctx.lineTo(ex+4+Math.cos(ang)*3.5*s, ey+bob+13+Math.sin(ang)*3.5*s); ctx.stroke();
             ctx.beginPath(); ctx.moveTo(ex+16,ey+bob+13); ctx.lineTo(ex+16+Math.cos(ang)*3.5*s, ey+bob+13+Math.sin(ang)*3.5*s); ctx.stroke();
         }
+
+        ctx.restore();
     } else if(e.type==='goblin_scout'){
+        ctx.save();
+        ctx.translate(ex+4, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+4), -(ey+bob+5));
+
+        ctx.fillStyle='rgba(0,0,0,0.22)';
+        ctx.beginPath(); ctx.ellipse(ex+4, ey+bob+14.5, 4.5*s, 1.4*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#1e4a6a';
         ctx.fillRect(ex+1, ey+bob+2, 8*s, 10*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#2e6a9a';
         ctx.fillRect(ex+2, ey+bob+3, 6*s, 8*s);
         ctx.fillStyle='rgba(255,255,255,0.18)';
         ctx.fillRect(ex+2, ey+bob+3, 2*s, 5*s);
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+6, ey+bob+3, 2*s, 5*s); // cloak shadow side
+        ctx.fillStyle=frozen?'#1a3550':'#12324a';
+        ctx.beginPath(); ctx.moveTo(ex+1, ey+bob+4); ctx.lineTo(ex-2, ey+bob+11); ctx.lineTo(ex+2, ey+bob+10); ctx.fill(); // cloak flap
+
         ctx.fillStyle=frozen?'#88ccff':'#4a8a3a';
-        ctx.fillRect(ex+2*s,(ey+bob-4)*s, 5*s, 6*s);
+        ctx.fillRect(ex+2, ey+bob-4, 5*s, 6*s); // face (fixed a double-scaled coordinate here)
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+2, ey+bob-4, 5*s, 1.4*s); // hood shadow over the brow
         ctx.fillStyle='#dd3333';
         ctx.fillRect(ex+1, ey+bob-6, 6*s, 2*s); // headband
+        ctx.fillStyle='#a81f1f';
+        ctx.beginPath(); ctx.arc(ex+7.5, ey+bob-5, 0.9*s, 0, Math.PI*2); ctx.fill(); // headband knot
         ctx.fillStyle='#ff0';
         ctx.fillRect(ex+3, ey+bob-2, 1.5*s, 1.5*s);
         ctx.fillRect(ex+5, ey+bob-2, 1.5*s, 1.5*s);
+        ctx.fillStyle='#221a00';
+        ctx.fillRect(ex+3.3, ey+bob-1.7, 0.7*s, 0.7*s);
+        ctx.fillRect(ex+5.3, ey+bob-1.7, 0.7*s, 0.7*s); // pupils
+
         ctx.fillStyle='#cccccc';
         ctx.fillRect(ex-2, ey+bob+4, 1.5*s, 5*s); // twin daggers
         ctx.fillRect(ex+8, ey+bob+4, 1.5*s, 5*s);
+        ctx.fillStyle='rgba(255,255,255,0.4)';
+        ctx.fillRect(ex-2, ey+bob+4, 0.6*s, 5*s);
+        ctx.fillRect(ex+8, ey+bob+4, 0.6*s, 5*s); // blade glints
+        ctx.fillStyle='#4a2f18';
+        ctx.fillRect(ex-2.1, ey+bob+8.5, 1.7*s, 1.4*s);
+        ctx.fillRect(ex+7.9, ey+bob+8.5, 1.7*s, 1.4*s); // dagger hilts
+
         ctx.fillStyle=frozen?'#88ccff':'#1e4a6a';
-        ctx.fillRect(ex+1, ey+bob+10, 2*s, 4*s);
-        ctx.fillRect(ex+5, ey+bob+10, 2*s, 4*s);
+        ctx.fillRect(ex+1+legOff*0.2, ey+bob+10, 2*s, 4*s);
+        ctx.fillRect(ex+5-legOff*0.2, ey+bob+10, 2*s, 4*s);
+
+        ctx.restore();
     } else if(e.type==='goblin_armored'){
+        ctx.save();
+        ctx.translate(ex+6, ey+bob+4);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+6), -(ey+bob+4));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob+18, 6*s, 1.7*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#2a4a1a';
         ctx.fillRect(ex, ey+bob, 12*s, 14*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#3a6a2a';
@@ -2566,20 +3125,60 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+1, ey+bob+2, 10*s, 5*s); // chest plate
         ctx.fillStyle='#999999';
         ctx.fillRect(ex+1, ey+bob+2, 10*s, 1.5*s); // plate highlight
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+8, ey+bob+2, 3*s, 5*s); // plate shadow side
+        ctx.fillStyle='#666666';
+        ctx.fillRect(ex-1.5, ey+bob+1, 3*s, 2.6*s); // shoulder pauldron
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.fillRect(ex-1.5, ey+bob+1, 3*s, 0.7*s);
+
         ctx.fillStyle='#555555';
         ctx.fillRect(ex+2, ey+bob-6, 8*s, 7*s); // helm
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(ex+2, ey+bob-6, 2*s, 7*s); // helm highlight edge
         ctx.fillStyle='#333';
         ctx.fillRect(ex+4, ey+bob-3, 4*s, 1.5*s); // visor slit
+        ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=Math.max(1,0.25*s);
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(ex+4+i*1.3,ey+bob-3); ctx.lineTo(ex+4+i*1.3,ey+bob-1.5); ctx.stroke(); } // visor mesh
         ctx.fillStyle='#ff2222';
         ctx.fillRect(ex+5, ey+bob-3, 1*s, 1*s); // eye glow through visor
+        ctx.fillStyle='#8a8a8a';
+        ctx.beginPath(); ctx.arc(ex+3, ey+bob-5.5, 0.6*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+9, ey+bob-5.5, 0.6*s, 0, Math.PI*2); ctx.fill(); // helm rivets
+
+        ctx.strokeStyle='#555'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.beginPath(); ctx.moveTo(ex-2,ey+bob+3); ctx.lineTo(ex-2,ey+bob+5); ctx.stroke(); // chain link on mace haft
         ctx.fillStyle='#888888';
-        ctx.fillRect(ex-2, ey+bob+3, 4*s, 8*s); // mace
+        ctx.fillRect(ex-2, ey+bob+5, 4*s, 8*s); // mace
         ctx.fillStyle='#aaaaaa';
-        ctx.beginPath(); ctx.arc(ex,ey+bob+3,2.5*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex,ey+bob+5,2.5*s,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#666666';
+        for(let a=0;a<6;a++){
+            let ang=a*Math.PI/3;
+            ctx.beginPath();
+            ctx.moveTo(ex+Math.cos(ang)*2.5*s, ey+bob+5+Math.sin(ang)*2.5*s);
+            ctx.lineTo(ex+Math.cos(ang)*3.6*s, ey+bob+5+Math.sin(ang)*3.6*s);
+            ctx.lineTo(ex+Math.cos(ang+0.3)*2.5*s, ey+bob+5+Math.sin(ang+0.3)*2.5*s);
+            ctx.fill();
+        } // mace spikes
+
         ctx.fillStyle=frozen?'#88ccff':'#2a4a1a';
         ctx.fillRect(ex+2, ey+bob+13, 3*s, 4*s);
         ctx.fillRect(ex+7, ey+bob+13, 3*s, 4*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#1a1108';
+        ctx.fillRect(ex+2, ey+bob+15.8, 3*s, 1.3*s);
+        ctx.fillRect(ex+7, ey+bob+15.8, 3*s, 1.3*s); // boots
+
+        ctx.restore();
     } else if(e.type==='wolf_dire'){
+        ctx.save();
+        ctx.translate(ex+10, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+10), -(ey+bob+7));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+10, ey+bob+17, 11*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#241c14';
         ctx.fillRect(ex, ey+bob+2, 20*s, 11*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#3a2a1a';
@@ -2588,25 +3187,54 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+1, ey+bob+3, 18*s, 2*s);
         ctx.fillStyle=frozen?'#88ccff':'#221a10';
         for(let i=0;i<5;i++) ctx.fillRect(ex+2+i*3.5, ey+bob+4, 1.5*s, 6*s); // dark fur streaks
+        ctx.fillStyle='#151008';
+        for(let i=0;i<4;i++) ctx.fillRect(ex+3+i*4.5, ey+bob+1.5, 1*s, 2*s); // spiky fur ridge along the back
+        ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.beginPath(); ctx.moveTo(ex+13,ey+bob+3); ctx.lineTo(ex+15,ey+bob+8); ctx.stroke(); // battle scar
+
         ctx.fillStyle=frozen?'#88ccff':'#4a3624';
         ctx.fillRect(ex-3, ey+bob+1, 8*s, 6*s);
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        ctx.fillRect(ex-3, ey+bob+5, 8*s, 2*s); // muzzle underside shading
         ctx.fillStyle=frozen?'#88ccff':'#221a10';
         ctx.fillRect(ex-3, ey+bob-2, 3*s, 4*s);
         ctx.fillRect(ex+2, ey+bob-2, 3*s, 4*s);
         ctx.fillStyle='#ff0000';
         ctx.fillRect(ex-1, ey+bob+2, 2.5*s, 2.5*s);
+        ctx.fillStyle='#3a0000';
+        ctx.fillRect(ex-0.4, ey+bob+2.6, 1*s, 1*s); // pupil
         ctx.fillStyle='rgba(255,80,80,0.7)';
         ctx.fillRect(ex-1, ey+bob+2, 1.2*s, 1.2*s); // glow
         ctx.fillStyle='#eeeeee';
-        ctx.fillRect(ex+3, ey+bob+6, 3*s, 1.2*s); // fangs
+        ctx.beginPath(); ctx.moveTo(ex+3,ey+bob+6); ctx.lineTo(ex+3.7,ey+bob+8); ctx.lineTo(ex+4.4,ey+bob+6); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+5,ey+bob+6); ctx.lineTo(ex+5.7,ey+bob+8); ctx.lineTo(ex+6.4,ey+bob+6); ctx.fill(); // fangs
+
         ctx.fillStyle=frozen?'#88ccff':'#221a10';
         ctx.fillRect(ex+2, ey+bob+12, 3*s, 5*s);
         ctx.fillRect(ex+7, ey+bob+12, 3*s, 5*s);
         ctx.fillRect(ex+12, ey+bob+12, 3*s, 5*s);
         ctx.fillRect(ex+16, ey+bob+12, 3*s, 5*s);
+        ctx.fillStyle='#0a0805';
+        [2,7,12,16].forEach(px=>{
+            ctx.beginPath(); ctx.moveTo(ex+px,ey+bob+17); ctx.lineTo(ex+px-0.5,ey+bob+18.3); ctx.lineTo(ex+px+0.7,ey+bob+17); ctx.fill();
+        }); // claws
+        ctx.fillStyle=frozen?'#88ccff':'#4a3624';
         ctx.fillRect(ex+18, ey+bob+1, 5*s, 3*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#221a10';
+        ctx.beginPath(); ctx.ellipse(ex+24, ey+bob+2, 2.6*s, 2*s, 0.3, 0, Math.PI*2); ctx.fill(); // fluffy tail tip
+
+        ctx.restore();
     } else if(e.type==='shade'){
+        ctx.save();
+        ctx.translate(ex+10, ey+bob+4);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+10), -(ey+bob+4));
+
         let flicker=0.55+Math.sin(animFrame*0.2)*0.2;
+        ctx.globalAlpha=flicker*0.4;
+        ctx.fillStyle='#cc88ff';
+        ctx.beginPath(); ctx.ellipse(ex+10, ey+bob+16, 6*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // faint ground glow, no real shadow — it barely touches down
+
         ctx.globalAlpha=flicker;
         ctx.fillStyle='#2a1240';
         ctx.beginPath();
@@ -2616,44 +3244,93 @@ function drawEnemy(e, ox, oy, s){
         ctx.lineTo(ex+18, ey+bob+16+Math.cos(animFrame*0.15)*2);
         ctx.lineTo(ex+14, ey+bob-6);
         ctx.fill(); // wispy robed silhouette, no distinct legs
+        ctx.globalAlpha=flicker*0.6;
+        ctx.beginPath();
+        ctx.moveTo(ex+9, ey+bob+2);
+        ctx.lineTo(ex+7, ey+bob+18+Math.sin(animFrame*0.2)*2.5);
+        ctx.lineTo(ex+11, ey+bob+16);
+        ctx.lineTo(ex+13, ey+bob+18+Math.cos(animFrame*0.22)*2.5);
+        ctx.fill(); // extra trailing tendril for more silhouette movement
+
         ctx.fillStyle='#4a2a70';
         ctx.fillRect(ex+5, ey+bob-8, 10*s, 6*s); // head/hood
+        ctx.globalAlpha=flicker*0.5;
+        ctx.fillStyle='rgba(200,150,255,0.5)';
+        ctx.fillRect(ex+5, ey+bob-8, 10*s, 1*s); // hood rim glow
         ctx.globalAlpha=1;
         ctx.fillStyle='#cc88ff';
         ctx.globalAlpha=0.7+Math.sin(animFrame*0.25)*0.3;
         ctx.fillRect(ex+7, ey+bob-5, 2*s, 2*s);
         ctx.fillRect(ex+11, ey+bob-5, 2*s, 2*s);
+        ctx.strokeStyle='rgba(200,150,255,0.35)'; ctx.lineWidth=Math.max(1,0.5*s);
+        ctx.beginPath(); ctx.moveTo(ex+8,ey+bob-2); ctx.quadraticCurveTo(ex+10,ey+bob-1,ex+12,ey+bob-2); ctx.stroke(); // faint hollow mouth line
         ctx.globalAlpha=1;
+
+        ctx.restore();
     } else if(e.type==='leshy'){
+        ctx.save();
+        ctx.translate(ex+7, ey+bob+8);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+7), -(ey+bob+8));
+
+        ctx.fillStyle='rgba(0,0,0,0.22)';
+        ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+19.5, 6*s, 1.6*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#3a2a18';
         ctx.fillRect(ex, ey+bob-2, 14*s, 18*s); // bark-body outline
         ctx.fillStyle=frozen?'#88ccff':'#5a4028';
         ctx.fillRect(ex+1, ey+bob-1, 12*s, 16*s);
         ctx.fillStyle='rgba(255,255,255,0.08)';
         ctx.fillRect(ex+1, ey+bob-1, 3*s, 16*s);
+        ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=Math.max(1,0.35*s);
+        ctx.beginPath(); ctx.moveTo(ex+4,ey+bob+1); ctx.lineTo(ex+3,ey+bob+7); ctx.lineTo(ex+5,ey+bob+11); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+0); ctx.lineTo(ex+10,ey+bob+6); ctx.stroke(); // bark cracks
+
         ctx.fillStyle=frozen?'#88ccff':'#2a4a1a';
-        for(let i=0;i<3;i++){
+        for(let i=0;i<4;i++){
             ctx.beginPath();
-            ctx.moveTo(ex+3+i*3, ey+bob-1);
-            ctx.lineTo(ex+1+i*3, ey+bob-6);
-            ctx.lineTo(ex+5+i*3, ey+bob-3);
+            ctx.moveTo(ex+2+i*2.6, ey+bob-1);
+            ctx.lineTo(ex+i*2.6, ey+bob-7);
+            ctx.lineTo(ex+4+i*2.6, ey+bob-4);
             ctx.fill();
-        } // leafy crown
+        } // fuller leafy crown
+        ctx.fillStyle=frozen?'#6bb0e0':'#3d6b2c';
+        for(let i=0;i<3;i++){
+            ctx.beginPath(); ctx.arc(ex+3+i*4, ey+bob-3, 1.8*s, 0, Math.PI*2); ctx.fill();
+        } // clustered leaf puffs over the crown spikes
+
+        ctx.fillStyle='#1a1108';
+        ctx.fillRect(ex+3.5, ey+bob-4.5, 1.4*s, 1.8*s);
+        ctx.fillRect(ex+8, ey+bob-4.5, 1.4*s, 1.8*s); // carved eye hollows
+        ctx.fillStyle='#ffaa22';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.1)*0.3;
+        ctx.fillRect(ex+3.7, ey+bob-4.2, 0.8*s, 1.2*s);
+        ctx.fillRect(ex+8.2, ey+bob-4.2, 0.8*s, 1.2*s); // glowing eyes within the hollows
+
         ctx.fillStyle='#6a5030';
         ctx.fillRect(ex+2, ey+bob+2, 2*s, 10*s);
         ctx.fillRect(ex+9, ey+bob+2, 2*s, 10*s); // bark ridges
-        ctx.fillStyle='#ffaa22';
-        ctx.globalAlpha=0.6+Math.sin(animFrame*0.1)*0.3;
-        ctx.fillRect(ex+4, ey+bob+3, 2*s, 2*s);
-        ctx.fillRect(ex+8, ey+bob+3, 2*s, 2*s);
         ctx.globalAlpha=1;
         ctx.strokeStyle='#3a5a1a';
         ctx.lineWidth=Math.max(1,s*0.6);
         ctx.beginPath(); ctx.moveTo(ex-2,ey+bob+6); ctx.quadraticCurveTo(ex-6,ey+bob+10,ex-3,ey+bob+16); ctx.stroke(); // thorny vine
+        ctx.strokeStyle='#2a4a1a'; ctx.lineWidth=Math.max(1,s*0.5);
+        for(let i=0;i<2;i++){ ctx.beginPath(); ctx.moveTo(ex+13,ey+bob+8+i*3); ctx.quadraticCurveTo(ex+16,ey+bob+10+i*3,ex+14,ey+bob+15+i*3); ctx.stroke(); } // extra vine tendrils
+
         ctx.fillStyle=frozen?'#88ccff':'#4a3520';
         ctx.fillRect(ex+2, ey+bob+14, 3*s, 5*s);
         ctx.fillRect(ex+8, ey+bob+14, 3*s, 5*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#3a2a18';
+        ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+19); ctx.lineTo(ex+1,ey+bob+21); ctx.lineTo(ex+3.5,ey+bob+19.5); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+8,ey+bob+19); ctx.lineTo(ex+7.5,ey+bob+21); ctx.lineTo(ex+10,ey+bob+19.5); ctx.fill(); // gnarled root feet
+
+        ctx.restore();
     } else if(e.type==='wisphawk'){
+        ctx.save();
+        ctx.translate(ex+7, ey+bob+5);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+7), -(ey+bob+5));
+
         let flap=Math.sin(animFrame*0.3)*4;
         ctx.fillStyle=frozen?'#6bb0e0':'#cccccc';
         ctx.globalAlpha=0.55;
@@ -2668,20 +3345,50 @@ function drawEnemy(e, ox, oy, s){
         ctx.lineTo(ex+20, ey+bob-flap);
         ctx.lineTo(ex+12, ey+bob+8);
         ctx.fill();
+        ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=Math.max(1,0.4*s);
+        for(let i=1;i<=3;i++){
+            ctx.beginPath(); ctx.moveTo(ex+7-i*3.5, ey+bob+4+(flap*i/3)*0.6); ctx.lineTo(ex+2-i*1.2, ey+bob+7); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex+7+i*3.8, ey+bob+4-(flap*i/3)*0.6); ctx.lineTo(ex+12+i*1.2, ey+bob+7); ctx.stroke();
+        } // individual feather strokes over each wing
         ctx.globalAlpha=1;
+
+        ctx.fillStyle=frozen?'#88ccff':'#dddddd';
+        ctx.beginPath();
+        ctx.moveTo(ex+7, ey+bob+9); ctx.lineTo(ex+4, ey+bob+15); ctx.lineTo(ex+7, ey+bob+13); ctx.lineTo(ex+10, ey+bob+15);
+        ctx.fill(); // tail feather fan
+
         ctx.fillStyle=frozen?'#88ccff':'#eeeeee';
         ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+5, 6*s, 3.5*s, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba(255,255,255,0.2)';
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob+3.5, 3*s, 1.6*s, -0.2, 0, Math.PI*2); ctx.fill(); // body sheen
         ctx.fillStyle='#ffdd88';
         ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+4); ctx.lineTo(ex-2,ey+bob+5); ctx.lineTo(ex+2,ey+bob+6); ctx.fill(); // beak
         ctx.fillStyle='#332211';
         ctx.fillRect(ex+5, ey+bob+3, 1.5*s, 1.5*s);
+        ctx.fillStyle='rgba(255,220,120,0.6)';
+        ctx.beginPath(); ctx.arc(ex+5.7, ey+bob+3.7, 0.9*s, 0, Math.PI*2); ctx.fill(); // glowing eye
+        ctx.fillStyle='#ddaa55';
+        ctx.beginPath(); ctx.moveTo(ex+5,ey+bob+8); ctx.lineTo(ex+4,ey+bob+9.5); ctx.lineTo(ex+6,ey+bob+9); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+8); ctx.lineTo(ex+8,ey+bob+9.5); ctx.lineTo(ex+10,ey+bob+9); ctx.fill(); // talons
+
+        ctx.restore();
     } else if(e.type==='brambletreant'){
+        ctx.save();
+        ctx.translate(ex+8, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+8), -(ey+bob+7));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+8, ey+bob+23, 7*s, 1.8*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#2e2010';
         ctx.fillRect(ex, ey+bob-4, 16*s, 22*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#4a3418';
         ctx.fillRect(ex+1, ey+bob-3, 14*s, 20*s);
         ctx.fillStyle='rgba(255,255,255,0.06)';
         ctx.fillRect(ex+1, ey+bob-3, 3*s, 20*s);
+        ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=Math.max(1,0.35*s);
+        ctx.beginPath(); ctx.moveTo(ex+5,ey+bob-2); ctx.lineTo(ex+4,ey+bob+6); ctx.lineTo(ex+6,ey+bob+12); ctx.stroke(); // bark crack
         ctx.fillStyle=frozen?'#88ccff':'#3a5a1a';
         for(let i=0;i<4;i++){
             ctx.beginPath();
@@ -2690,49 +3397,118 @@ function drawEnemy(e, ox, oy, s){
             ctx.lineTo(ex+5+i*3, ey+bob-6);
             ctx.fill();
         } // dense canopy
+        ctx.fillStyle=frozen?'#6bb0e0':'#4d7a2c';
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc(ex+3+i*5, ey+bob-6, 2*s, 0, Math.PI*2); ctx.fill(); } // leaf puffs over the canopy
         ctx.fillStyle='#221a10';
         ctx.fillRect(ex+3, ey+bob+3, 1.5*s, 1.5*s);
         ctx.fillRect(ex+10, ey+bob+3, 1.5*s, 1.5*s); // knot eyes
+        ctx.fillStyle='rgba(140,220,255,0.5)';
+        ctx.globalAlpha=0.6+Math.sin(animFrame*0.15)*0.3;
+        ctx.fillRect(ex+3.3, ey+bob+3.3, 0.9*s, 0.9*s);
+        ctx.fillRect(ex+10.3, ey+bob+3.3, 0.9*s, 0.9*s); // faint glow within the knots
+        ctx.globalAlpha=1;
         ctx.strokeStyle='#5a4020';
         ctx.lineWidth=Math.max(1,s*0.5);
         for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+6+i*4); ctx.lineTo(ex+14,ey+bob+8+i*4); ctx.stroke(); }
+        ctx.strokeStyle='#2a4a10'; ctx.lineWidth=Math.max(1,s*0.7);
+        ctx.beginPath(); ctx.moveTo(ex+1,ey+bob+5); ctx.quadraticCurveTo(ex+15,ey+bob+9,ex+2,ey+bob+15); ctx.stroke(); // thorn vine wrapping the trunk
         ctx.fillStyle=frozen?'#88ccff':'#2e2010';
         ctx.fillRect(ex+2, ey+bob+16, 4*s, 6*s);
         ctx.fillRect(ex+10, ey+bob+16, 4*s, 6*s);
+        ctx.fillStyle=frozen?'#5a8aab':'#221a10';
+        ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+22); ctx.lineTo(ex+0.5,ey+bob+24.3); ctx.lineTo(ex+4,ey+bob+22.6); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+10,ey+bob+22); ctx.lineTo(ex+8.5,ey+bob+24.3); ctx.lineTo(ex+12,ey+bob+22.6); ctx.fill(); // gnarled root feet
+
+        ctx.restore();
     } else if(e.type==='embersalamander'){
+        ctx.save();
+        ctx.translate(ex+9, ey+bob+8);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+9), -(ey+bob+8));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+16.5, 10*s, 1.8*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#5a1a0a';
         ctx.fillRect(ex, ey+bob+4, 18*s, 9*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#aa3311';
         ctx.fillRect(ex+1, ey+bob+5, 16*s, 7*s);
+        ctx.strokeStyle='rgba(0,0,0,0.2)'; ctx.lineWidth=Math.max(1,0.3*s);
+        for(let i=0;i<5;i++){ ctx.beginPath(); ctx.arc(ex+2+i*3, ey+bob+7, 1.4*s, 0.2, Math.PI-0.2); ctx.stroke(); } // scale texture
+        ctx.fillStyle='#8a2a0a';
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(ex+3+i*5,ey+bob+5); ctx.lineTo(ex+4.5+i*5,ey+bob+2); ctx.lineTo(ex+6+i*5,ey+bob+5); ctx.fill(); } // spine fins
         ctx.fillStyle='#ff6622';
         ctx.globalAlpha=0.5+Math.sin(animFrame*0.2)*0.3;
         for(let i=0;i<4;i++) ctx.fillRect(ex+2+i*4, ey+bob+6, 2*s, 5*s); // glowing back segments
         ctx.globalAlpha=1;
         ctx.fillStyle=frozen?'#88ccff':'#aa3311';
         ctx.fillRect(ex-3, ey+bob+5, 6*s, 5*s); // head
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex-3, ey+bob+8, 6*s, 2*s); // jaw underside shading
         ctx.fillStyle='#ffdd00';
         ctx.fillRect(ex-1, ey+bob+6, 1.5*s, 1.5*s);
+        ctx.fillStyle='#4a1400';
+        ctx.fillRect(ex-0.6, ey+bob+6.4, 0.7*s, 0.7*s); // pupil
         ctx.strokeStyle='#ff4400';
         ctx.lineWidth=Math.max(1,s*0.6);
         ctx.beginPath(); ctx.moveTo(ex+16,ey+bob+8); ctx.quadraticCurveTo(ex+22,ey+bob+6,ex+21,ey+bob+12); ctx.stroke(); // tail flame
+        ctx.fillStyle='rgba(255,150,50,0.7)';
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.3)*0.3;
+        ctx.beginPath(); ctx.arc(ex+21.5, ey+bob+8, 0.9*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+19.5, ey+bob+11, 0.6*s, 0, Math.PI*2); ctx.fill(); // ember particles off the tail
+        ctx.globalAlpha=1;
         ctx.fillStyle=frozen?'#88ccff':'#5a1a0a';
         ctx.fillRect(ex+2, ey+bob+12, 2*s, 4*s);
         ctx.fillRect(ex+8, ey+bob+12, 2*s, 4*s);
         ctx.fillRect(ex+13, ey+bob+12, 2*s, 4*s);
+        ctx.fillStyle='#2a0a02';
+        [2,8,13].forEach(px=>{
+            ctx.beginPath(); ctx.moveTo(ex+px,ey+bob+16); ctx.lineTo(ex+px-0.4,ey+bob+16.9); ctx.lineTo(ex+px+0.6,ey+bob+16); ctx.fill();
+        }); // claws
+
+        ctx.restore();
     } else if(e.type==='irongolem'){
+        ctx.save();
+        ctx.translate(ex+7, ey+bob+8);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+7), -(ey+bob+8));
+
+        ctx.fillStyle='rgba(0,0,0,0.28)';
+        ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+24, 8*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#2a2a30';
         ctx.fillRect(ex-1, ey+bob-3, 18*s, 22*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#5a5a66';
         ctx.fillRect(ex, ey+bob-2, 16*s, 20*s);
         ctx.fillStyle='rgba(255,255,255,0.15)';
         ctx.fillRect(ex, ey+bob-2, 4*s, 20*s);
+        ctx.fillStyle='rgba(0,0,0,0.15)';
+        ctx.fillRect(ex+12, ey+bob-2, 4*s, 20*s); // shadow side
+        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=Math.max(1,0.5*s);
+        ctx.beginPath(); ctx.moveTo(ex,ey+bob+6); ctx.lineTo(ex+16,ey+bob+6); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex,ey+bob+17); ctx.lineTo(ex+16,ey+bob+17); ctx.stroke(); // joint seams
+
         ctx.fillStyle='#3a3a44';
         ctx.fillRect(ex+2, ey+bob+2, 12*s, 3*s); // rivet band
         ctx.fillStyle='#8a8a99';
         ctx.beginPath(); ctx.arc(ex+4,ey+bob+3,1*s,0,Math.PI*2); ctx.fill();
-        ctx.beginPath(); ctx.arc(ex+12,ey+bob+3,1*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+8,ey+bob+3,1*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+12,ey+bob+3,1*s,0,Math.PI*2); ctx.fill(); // extra middle rivet
+
+        ctx.fillStyle='#1a1a1a';
+        ctx.beginPath(); ctx.moveTo(ex+6,ey+bob+8); ctx.lineTo(ex+8,ey+bob+13); ctx.lineTo(ex+7,ey+bob+16); ctx.lineTo(ex+9,ey+bob+15); ctx.lineTo(ex+8,ey+bob+9); ctx.fill(); // chest crack
+        ctx.fillStyle='#ff8822';
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.15)*0.3;
+        ctx.beginPath(); ctx.arc(ex+7.5, ey+bob+12, 1.4*s, 0, Math.PI*2); ctx.fill(); // glowing core seen through the crack
+        ctx.globalAlpha=1;
+
         ctx.fillStyle='#444450';
         ctx.fillRect(ex+3, ey+bob-6, 10*s, 6*s); // head block
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(ex+3, ey+bob-6, 3*s, 6*s); // head highlight
+        ctx.fillStyle='#8a8a99';
+        ctx.beginPath(); ctx.arc(ex+4,ey+bob-5,0.6*s,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+12,ey+bob-5,0.6*s,0,Math.PI*2); ctx.fill(); // head rivets
         ctx.fillStyle='#ff8822';
         ctx.globalAlpha=0.7+Math.sin(animFrame*0.1)*0.3;
         ctx.fillRect(ex+5, ey+bob-4, 2*s, 2*s);
@@ -2741,7 +3517,20 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillStyle=frozen?'#88ccff':'#5a5a66';
         ctx.fillRect(ex+2, ey+bob+18, 4*s, 5*s);
         ctx.fillRect(ex+10, ey+bob+18, 4*s, 5*s);
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+2, ey+bob+21, 4*s, 1.4*s);
+        ctx.fillRect(ex+10, ey+bob+21, 4*s, 1.4*s); // foot shadow
+
+        ctx.restore();
     } else if(e.type==='bombbeetle'){
+        ctx.save();
+        ctx.translate(ex+9, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+9), -(ey+bob+7));
+
+        ctx.fillStyle='rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+16, 9*s, 1.8*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#1a1a1a';
         ctx.fillRect(ex, ey+bob+2, 18*s, 12*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#333333';
@@ -2751,6 +3540,12 @@ function drawEnemy(e, ox, oy, s){
         ctx.strokeStyle='#111';
         ctx.lineWidth=Math.max(1,s*0.6);
         ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+2); ctx.lineTo(ex+9,ey+bob+14); ctx.stroke(); // shell seam
+        ctx.lineWidth=Math.max(1,s*0.35);
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+8, 6*s, 4*s, 0, 0.3, Math.PI-0.3); ctx.stroke();
+        ctx.beginPath(); ctx.ellipse(ex+9, ey+bob+8, 6*s, 4*s, 0, Math.PI+0.3, Math.PI*2-0.3); ctx.stroke(); // shell segment ridges
+        ctx.strokeStyle='#333'; ctx.lineWidth=Math.max(1,s*0.4);
+        ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+3); ctx.quadraticCurveTo(ex-2,ey+bob-1,ex-1,ey+bob-4); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex+4,ey+bob+2); ctx.quadraticCurveTo(ex+1,ey+bob-2,ex+2,ey+bob-5); ctx.stroke(); // antennae
         ctx.fillStyle='#ff6600';
         ctx.globalAlpha=0.6+Math.sin(animFrame*0.25)*0.4;
         ctx.beginPath(); ctx.arc(ex+9,ey+bob+8,2.5*s,0,Math.PI*2); ctx.fill(); // glowing fuse core
@@ -2758,15 +3553,41 @@ function drawEnemy(e, ox, oy, s){
         ctx.strokeStyle='#ffaa00';
         ctx.lineWidth=Math.max(1,s*0.5);
         ctx.beginPath(); ctx.moveTo(ex+9,ey+bob+2); ctx.quadraticCurveTo(ex+12,ey+bob-2,ex+10,ey+bob-5); ctx.stroke(); // lit fuse
+        ctx.fillStyle='#ffcc44';
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.4)*0.5;
+        ctx.beginPath(); ctx.arc(ex+10, ey+bob-5, 0.9*s, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(ex+11.2, ey+bob-6.4, 0.5*s, 0, Math.PI*2); ctx.fill(); // extra fuse sparks
+        ctx.globalAlpha=1;
         ctx.fillStyle=frozen?'#88ccff':'#1a1a1a';
         for(let i=0;i<3;i++){ ctx.fillRect(ex+2+i*6, ey+bob+12, 2*s, 4*s); ctx.fillRect(ex+2+i*6, ey+bob-1, 2*s, 3*s); }
+        ctx.fillStyle='rgba(0,0,0,0.4)';
+        for(let i=0;i<3;i++){ ctx.fillRect(ex+2+i*6, ey+bob+15.2, 2*s, 0.8*s); ctx.fillRect(ex+2+i*6, ey+bob-1.4, 2*s, 0.6*s); } // leg joints
+
+        ctx.restore();
     } else if(e.type==='golemsentinel'){
+        ctx.save();
+        ctx.translate(ex+7, ey+bob+9);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+7), -(ey+bob+9));
+
+        ctx.fillStyle='rgba(0,0,0,0.28)';
+        ctx.beginPath(); ctx.ellipse(ex+7, ey+bob+26, 8*s, 2*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#1a2530';
         ctx.fillRect(ex-1, ey+bob-4, 18*s, 24*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#3a5566';
         ctx.fillRect(ex, ey+bob-3, 16*s, 22*s);
         ctx.fillStyle='rgba(255,255,255,0.12)';
         ctx.fillRect(ex, ey+bob-3, 4*s, 22*s);
+        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.beginPath(); ctx.moveTo(ex+3,ey+bob+1); ctx.lineTo(ex+2,ey+bob+8); ctx.lineTo(ex+4,ey+bob+13); ctx.stroke(); // cracked stone seam
+        ctx.fillStyle='#25384a';
+        ctx.fillRect(ex-2, ey+bob-2, 4*s, 4*s);
+        ctx.fillRect(ex+14, ey+bob-2, 4*s, 4*s); // shoulder plating
+        ctx.fillStyle='rgba(102,221,255,0.15)';
+        ctx.fillRect(ex-2, ey+bob-2, 4*s, 1*s);
+        ctx.fillRect(ex+14, ey+bob-2, 4*s, 1*s);
+
         ctx.fillStyle='#223344';
         ctx.fillRect(ex+2, ey+bob-8, 12*s, 6*s); // head
         ctx.fillStyle='#aaffff';
@@ -2777,76 +3598,170 @@ function drawEnemy(e, ox, oy, s){
         ctx.strokeStyle='#66ddff';
         ctx.lineWidth=Math.max(1,s*0.6);
         for(let i=0;i<2;i++){ ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+2+i*8); ctx.lineTo(ex+14,ey+bob+2+i*8); ctx.stroke(); } // conduit lines
+        ctx.strokeStyle='rgba(170,255,255,0.5)'; ctx.lineWidth=Math.max(1,0.25*s);
+        ctx.globalAlpha=0.5+Math.sin(animFrame*0.3)*0.3;
+        ctx.beginPath(); ctx.moveTo(ex+8,ey+bob-2); ctx.lineTo(ex+8,ey+bob+2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex+8,ey+bob+10); ctx.lineTo(ex+8,ey+bob+14); ctx.stroke(); // vertical conduit branches, pulsing with the horizontal lines
+        ctx.globalAlpha=1;
+        ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=Math.max(1,0.4*s);
+        ctx.beginPath(); ctx.moveTo(ex,ey+bob+16); ctx.lineTo(ex+16,ey+bob+16); ctx.stroke(); // hip joint seam
         ctx.fillStyle=frozen?'#88ccff':'#1a2530';
         ctx.fillRect(ex+2, ey+bob+17, 4*s, 5*s);
         ctx.fillRect(ex+10, ey+bob+17, 4*s, 5*s);
+
+        ctx.restore();
     } else if(e.type==='rottedrevenant'){
+        ctx.save();
+        ctx.translate(ex+6, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+6), -(ey+bob+7));
+
+        ctx.fillStyle='rgba(0,0,0,0.22)';
+        ctx.beginPath(); ctx.ellipse(ex+6, ey+bob+18, 5*s, 1.5*s, 0, 0, Math.PI*2); ctx.fill(); // ground shadow
+
         ctx.fillStyle=frozen?'#6bb0e0':'#2a3a1a';
         ctx.fillRect(ex+1, ey+bob-1, 10*s, 16*s); // outline
         ctx.fillStyle=frozen?'#88ccff':'#4a5a2a';
         ctx.fillRect(ex+2, ey+bob, 8*s, 14*s);
+        ctx.fillStyle=frozen?'#1a3550':'#1a2a10';
+        ctx.beginPath(); ctx.moveTo(ex+1, ey+bob+2); ctx.lineTo(ex-2, ey+bob+13); ctx.lineTo(ex+2, ey+bob+11); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+11, ey+bob+3); ctx.lineTo(ex+14, ey+bob+14); ctx.lineTo(ex+10, ey+bob+11); ctx.fill(); // tattered cloth flaps
+        ctx.fillStyle='#e8e4c8';
+        ctx.fillRect(ex+3, ey+bob+5, 0.8*s, 5*s);
+        ctx.fillRect(ex+5.5, ey+bob+5, 0.8*s, 5*s);
+        ctx.fillRect(ex+8, ey+bob+5, 0.8*s, 5*s); // exposed ribs through the torn robe
         ctx.fillStyle='#6a7a3a';
         ctx.fillRect(ex+3, ey+bob-6, 6*s, 7*s); // rotted head
         ctx.fillStyle='#1a1a0a';
         ctx.fillRect(ex+4, ey+bob-3, 2*s, 3*s); // exposed decay patch
+        ctx.fillRect(ex+2.5, ey+bob-6, 1.6*s, 2*s); // second decay patch on the skull
         ctx.fillStyle='#aaff44';
         ctx.globalAlpha=0.6+Math.sin(animFrame*0.15)*0.3;
         ctx.fillRect(ex+4, ey+bob-4, 1.3*s, 1.3*s);
         ctx.fillRect(ex+7, ey+bob-4, 1.3*s, 1.3*s);
+        ctx.globalAlpha=1;
+        ctx.fillStyle='rgba(140,200,60,0.5)';
+        ctx.globalAlpha=0.4+Math.sin(animFrame*0.12)*0.2;
+        ctx.beginPath(); ctx.moveTo(ex+4.6,ey+bob-2.5); ctx.lineTo(ex+4.3,ey+bob+0.5); ctx.lineTo(ex+4.9,ey+bob+0.3); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+7.6,ey+bob-2.5); ctx.lineTo(ex+7.3,ey+bob+1); ctx.lineTo(ex+7.9,ey+bob+0.6); ctx.fill(); // dripping ooze trails
         ctx.globalAlpha=1;
         ctx.fillStyle='#3a4a1a';
         for(let i=0;i<2;i++) ctx.fillRect(ex+2+i*5, ey+bob+3, 1.5*s, 8*s); // tattered rot streaks
         ctx.fillStyle=frozen?'#88ccff':'#2a3a1a';
         ctx.fillRect(ex+2, ey+bob+13, 3*s, 4*s);
         ctx.fillRect(ex+6, ey+bob+13, 3*s, 4*s);
+
+        ctx.restore();
     } else if(e.type==='skyraider'){
         // Flying enemies render offset upward with a small ground shadow so
         // their airborne status reads clearly, even though collision/contact
         // logic still treats them at the same x position as everything else.
         let fy = ey-16+Math.sin(animFrame*0.3+e.x*0.2)*3; // faster wingbeat bob
+        ctx.save();
+        ctx.translate(ex+5, fy+3);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+5), -(fy+3));
+
         ctx.fillStyle='rgba(0,0,0,0.25)';
         ctx.beginPath(); ctx.ellipse(ex+5, ey+13, 4*s, 1.5*s, 0, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle=frozen?'#88ccff':'#5a4a7a';
         ctx.fillRect(ex+2, fy, 6*s, 6*s); // body
+        ctx.fillStyle='rgba(0,0,0,0.2)';
+        ctx.fillRect(ex+2, fy+4, 6*s, 2*s); // hood/cloak shadow at the base
         let wingSpread = 5+Math.sin(animFrame*0.5+e.x*0.2)*4;
         ctx.fillStyle=frozen?'#aaddff':'#8866cc';
         ctx.fillRect(ex+2-wingSpread, fy+1, wingSpread*s, 3*s); // left wing
         ctx.fillRect(ex+8, fy+1, wingSpread*s, 3*s); // right wing
+        ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=Math.max(1,0.3*s);
+        for(let i=1;i<=2;i++){
+            ctx.beginPath(); ctx.moveTo(ex+2-wingSpread*i/2, fy+1); ctx.lineTo(ex+2-wingSpread*i/2, fy+4); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex+8+wingSpread*i/2, fy+1); ctx.lineTo(ex+8+wingSpread*i/2, fy+4); ctx.stroke();
+        } // feather divisions on each wing
         ctx.fillStyle='#ffcc44';
         ctx.fillRect(ex+3, fy+1, 1.3*s, 1.3*s); // eye
+        ctx.fillStyle='#1a1400';
+        ctx.fillRect(ex+3.3, fy+1.3, 0.6*s, 0.6*s); // pupil
         ctx.fillStyle='#3a2a5a';
         ctx.fillRect(ex+7, fy+2, 2*s, 1*s); // beak
+        ctx.fillStyle='#dda833';
+        ctx.beginPath(); ctx.moveTo(ex+3,fy+6); ctx.lineTo(ex+2.3,fy+7.2); ctx.lineTo(ex+3.7,fy+6.8); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+6,fy+6); ctx.lineTo(ex+5.3,fy+7.2); ctx.lineTo(ex+6.7,fy+6.8); ctx.fill(); // talons
+
+        ctx.restore();
     } else if(e.type==='wyvern'){
         let fy = ey-20+Math.sin(animFrame*0.12+e.x*0.15)*2; // slow, heavy wingbeat
+        ctx.save();
+        ctx.translate(ex+6, fy+4);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+6), -(fy+4));
+
         ctx.fillStyle='rgba(0,0,0,0.3)';
         ctx.beginPath(); ctx.ellipse(ex+6, ey+13, 7*s, 2*s, 0, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle=frozen?'#6bb0e0':'#4a1a1a';
         ctx.fillRect(ex+1, fy, 12*s, 9*s); // body outline
         ctx.fillStyle=frozen?'#88ccff':'#7a2a2a';
         ctx.fillRect(ex+2, fy+1, 10*s, 7*s);
+        ctx.strokeStyle='rgba(0,0,0,0.2)'; ctx.lineWidth=Math.max(1,0.3*s);
+        for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc(ex+3+i*3, fy+4, 1.6*s, 0.2, Math.PI-0.2); ctx.stroke(); } // scale texture
         let wingSpread = 9+Math.sin(animFrame*0.15+e.x*0.15)*5;
         ctx.fillStyle=frozen?'#aaddff':'#5a1515';
         ctx.fillRect(ex+2-wingSpread, fy-1, wingSpread*s, 5*s); // left wing
         ctx.fillRect(ex+11, fy-1, wingSpread*s, 5*s); // right wing
+        ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=Math.max(1,0.35*s);
+        for(let i=1;i<=3;i++){
+            ctx.beginPath(); ctx.moveTo(ex+2, fy-1+i*1.4); ctx.lineTo(ex+2-wingSpread, fy-1); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex+11, fy-1+i*1.4); ctx.lineTo(ex+11+wingSpread, fy-1); ctx.stroke();
+        } // wing membrane ribs
+        ctx.fillStyle='#3a1010';
+        ctx.beginPath(); ctx.moveTo(ex+8,fy+1); ctx.lineTo(ex+9,fy-2); ctx.lineTo(ex+10,fy+1); ctx.fill(); // horn
         ctx.fillStyle='#ffaa00';
         ctx.fillRect(ex+9, fy+2, 1.6*s, 1.6*s); // eye
+        ctx.fillStyle='#3a1400';
+        ctx.fillRect(ex+9.4, fy+2.4, 0.8*s, 0.8*s); // pupil
         ctx.fillStyle='#5a1515';
         ctx.fillRect(ex+11, fy+4, 3*s, 1.3*s); // tail spike
+        ctx.fillStyle='#3a1010';
+        ctx.fillRect(ex+13.5, fy+3.6, 1.6*s, 0.9*s); // second tail barb
+        ctx.fillStyle='#dda833';
+        ctx.beginPath(); ctx.moveTo(ex+3,fy+8); ctx.lineTo(ex+2,fy+9.5); ctx.lineTo(ex+4,fy+9); ctx.fill(); // clawed foot tucked beneath
+
+        ctx.restore();
     } else if(e.type==='stoneburrower'){
         // Underground enemies render mostly hidden beneath a dirt mound, only
         // a rocky hump visible above the surface, selling the "burrowing" read.
+        ctx.save();
+        ctx.translate(ex+5, ey+bob+7);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+5), -(ey+bob+7));
+
         ctx.fillStyle='#4a3a28';
         ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+11, 8*s, 3.5*s, 0, 0, Math.PI*2); ctx.fill(); // dirt mound
         ctx.fillStyle=frozen?'#6bb0e0':'#6a6a5a';
         ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+6, 7*s, 6*s, 0, 0, Math.PI); ctx.fill(); // rocky hump poking out
         ctx.fillStyle=frozen?'#88ccff':'#8a8a7a';
         ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+5, 5*s, 4*s, 0, 0, Math.PI); ctx.fill();
+        ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.lineWidth=Math.max(1,0.3*s);
+        ctx.beginPath(); ctx.moveTo(ex+2,ey+bob+5); ctx.lineTo(ex+4,ey+bob+3); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex+7,ey+bob+4); ctx.lineTo(ex+8.5,ey+bob+5.5); ctx.stroke(); // hump cracks
         ctx.fillStyle='#ffcc44';
         ctx.fillRect(ex+3, ey+bob+3, 1.3*s, 1.3*s); // eye
         ctx.fillRect(ex+7, ey+bob+3, 1.3*s, 1.3*s);
+        ctx.fillStyle='#1a1400';
+        ctx.fillRect(ex+3.3, ey+bob+3.3, 0.6*s, 0.6*s);
+        ctx.fillRect(ex+7.3, ey+bob+3.3, 0.6*s, 0.6*s); // pupils
         ctx.fillStyle='#3a3a2a';
         for(let i=0;i<3;i++) ctx.fillRect(ex+1+i*3.5, ey+bob+10, 1.3*s, 1.3*s); // dirt clods kicked up
+        ctx.fillStyle='#5a5a4a';
+        ctx.beginPath(); ctx.moveTo(ex-1,ey+bob+9); ctx.lineTo(ex-2.5,ey+bob+11); ctx.lineTo(ex-0.3,ey+bob+10.5); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+11,ey+bob+9); ctx.lineTo(ex+12.5,ey+bob+11); ctx.lineTo(ex+10.3,ey+bob+10.5); ctx.fill(); // drill claws breaking the surface
+
+        ctx.restore();
     } else if(e.type==='graveworm'){
+        ctx.save();
+        ctx.translate(ex+5, ey+bob+6);
+        ctx.scale(1.25, 1.25);
+        ctx.translate(-(ex+5), -(ey+bob+6));
+
         ctx.fillStyle='#2a1a2a';
         ctx.beginPath(); ctx.ellipse(ex+5, ey+bob+12, 7*s, 3*s, 0, 0, Math.PI*2); ctx.fill(); // dirt mound
         let wriggle = Math.sin(animFrame*0.2+e.x*0.2)*2;
@@ -2854,12 +3769,21 @@ function drawEnemy(e, ox, oy, s){
         ctx.fillRect(ex+2+wriggle, ey+bob+2, 6*s, 8*s); // worm segment outline
         ctx.fillStyle=frozen?'#88ccff':'#7a3a7a';
         ctx.fillRect(ex+3+wriggle, ey+bob+3, 4*s, 6*s);
+        ctx.fillStyle='rgba(255,255,255,0.1)';
+        ctx.fillRect(ex+3+wriggle, ey+bob+3, 1.2*s, 6*s); // body sheen
         ctx.fillStyle='#aa5aaa';
-        for(let i=0;i<2;i++) ctx.fillRect(ex+3+wriggle, ey+bob+4+i*3, 4*s, 1*s); // segment rings
+        for(let i=0;i<3;i++) ctx.fillRect(ex+3+wriggle, ey+bob+4+i*2.2, 4*s, 1*s); // segment rings (one more than before)
+        ctx.fillStyle='#1a0a1a';
+        ctx.beginPath(); ctx.arc(ex+4+wriggle, ey+bob+3.6, 0.9*s, 0, Math.PI*2); ctx.fill(); // eye socket
         ctx.fillStyle='#ccff44';
         ctx.globalAlpha=0.5+Math.sin(animFrame*0.2)*0.3;
-        ctx.fillRect(ex+3+wriggle, ey+bob+3, 1.3*s, 1.3*s); // toxic glow eye
+        ctx.fillRect(ex+3.6+wriggle, ey+bob+3.2, 1.3*s, 1.3*s); // toxic glow eye
         ctx.globalAlpha=1;
+        ctx.fillStyle='#4a2a4a';
+        ctx.beginPath(); ctx.moveTo(ex+3+wriggle,ey+bob+9); ctx.lineTo(ex+2+wriggle,ey+bob+10.5); ctx.lineTo(ex+3.6+wriggle,ey+bob+9.6); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex+6+wriggle,ey+bob+9); ctx.lineTo(ex+7+wriggle,ey+bob+10.5); ctx.lineTo(ex+5.4+wriggle,ey+bob+9.6); ctx.fill(); // mandibles
+
+        ctx.restore();
     } else if(e.type==='boss'){
         drawBossSprite(e, ex, ey, s, bob, frozen);
     }
@@ -3189,18 +4113,22 @@ function towerUpdate(t){
     if(towersFrozen>0) return;
     t.cooldown--;
     if(t.cooldown>0) return;
-    let rate = Math.floor(t.rate / globalSpeedMult * kingdomRateMult * (1-(t.apprenticeRateBonus||0)));
+    let rate = Math.floor(t.rate / globalSpeedMult * kingdomRateMult * (1-(t.apprenticeRateBonus||0)) * curseRustedRateMult);
     if(activeWeather==='blizzard') rate = Math.floor(rate*1.5); // fires 50% slower
+    if(equippedRelics.includes('relic_berserker')) rate = Math.floor(rate * (1 - 0.4*(1-castleHP/maxHP))); // faster as HP drops
+    if(equippedRelics.includes('relic_reckless')) rate = Math.floor(rate * Math.max(0.5, 1 - Math.min(0.5, waveFrameCount*0.0005))); // faster the longer the wave runs
 
     if(t.id==='necromancer'){
         // Doesn't fire projectiles — instead periodically resurrects
         // skeletonCount skeletons that melee whatever's nearby.
         t.cooldown = rate;
         let count = (t.skeletonCount || 1) + kingdomHealersSkeletonBonus;
+        let hasUndying = equippedRelics.includes('relic_undying');
         for(let i=0;i<count;i++){
+            if(hasUndying && skeletonAllies.length>=3) break;
             skeletonAllies.push({
                 x: t.x+10+i*4, y: t.y+16,
-                life: 480, // ~8s at 60fps before the skeleton crumbles
+                life: hasUndying ? Infinity : 480, // ~8s at 60fps before the skeleton crumbles
                 hitTimer: 0,
                 dmg: t.dmg*globalDmgMult*waveDmgMult*(t.level>1?1+t.level*0.3:1),
                 rangePercent: t.rangePercent,
@@ -3250,6 +4178,7 @@ function towerUpdate(t){
     if(t.id==='axeman') ptype='axe';
     if(t.id==='poison') ptype='poison';
     let dmg=t.dmg*globalDmgMult*waveDmgMult*(t.level>1?1+t.level*0.3:1);
+    if(equippedRelics.includes('relic_bonechoir')) dmg *= (1+0.01*skeletonAllies.length);
     if(t.id==='archer' || t.id==='axeman') dmg += kingdomDmgBonusArcherAxe;
     if(t.apprenticeDmgBonus) dmg += t.apprenticeDmgBonus;
     if(activeWeather==='rain' && t.id==='firemage') dmg *= 0.5; // fire towers weaker in the rain
@@ -3264,7 +4193,8 @@ function towerUpdate(t){
         let hitList=[];
         let current=target;
         let usedIds=new Set();
-        for(let i=0;i<t.chainCount && current;i++){
+        let effChainCount = t.chainCount + (equippedRelics.includes('relic_coils') ? 1 : 0);
+        for(let i=0;i<effChainCount && current;i++){
             let jumpDmg = dmg*Math.pow(t.chainFalloff,i);
             applyDamageToEnemy(current, jumpDmg, t.id);
             if(!current.dead) current.frozen = Math.max(current.frozen||0, Math.round(20*kingdomEffectDurationMult));
@@ -3282,7 +4212,7 @@ function towerUpdate(t){
         return;
     }
 
-    let effSplash = t.splash;
+    let effSplash = t.splash ? t.splash*curseRustedSplashMult : t.splash;
     if(t.id==='poison' && t.apprenticeSplashBonus) effSplash = t.splash*(1+t.apprenticeSplashBonus);
     let freezeBonusMult = (t.id==='icemage' && t.apprenticeFreezeBonus) ? (1+t.apprenticeFreezeBonus) : 1;
 
@@ -3316,6 +4246,7 @@ function gameLoop(time){
     drawCastle(ox, oy, s);
 
     if(state==='playing'){
+        waveFrameCount++;
         spawnTimer++;
         let spawnParams = getSpawnParams();
         if(spawnQueue.length>0 && spawnTimer>spawnParams.interval){
@@ -3338,7 +4269,7 @@ function gameLoop(time){
                 if(e.poisonTimer>=15){
                     e.poisonTimer=0;
                     e.poisonTicks--;
-                    applyDamageToEnemy(e, e.poisonDmgPerTick, e.poisonSource);
+                    applyDamageToEnemy(e, e.poisonDmgPerTick, e.poisonSource, true);
                 }
                 if(e.dead) return;
             }
@@ -3348,6 +4279,11 @@ function gameLoop(time){
                     e.burnTimer=0;
                     e.burnTicks--;
                     applyDamageToEnemy(e, e.burnDmgPerTick, e.burnSource);
+                    if(equippedRelics.includes('relic_kindling')){
+                        enemies.forEach(other=>{
+                            if(other!==e && !other.dead && Math.abs(other.x-e.x)<25) applyDamageToEnemy(other, e.burnDmgPerTick, e.burnSource);
+                        });
+                    }
                 }
                 if(e.dead) return;
             }
@@ -3358,6 +4294,7 @@ function gameLoop(time){
                 // Incremental contact damage (scaled down)
                 castleHP-=e.dmg*0.005*waveContactDmgMult*(1-runPowerupBonuses.luckycharm); 
                 lastDamageSource = { type: e.type, flying: !!e.flying, method: 'contact' };
+                if(activeMutator==='vampiric' && e.hp<e.maxHp) e.hp=Math.min(e.maxHp, e.hp+e.maxHp*0.004);
                 if(e.x<=70){ 
                     // Direct impact / explosive break on reach
                     let fullDmg = 20; // goblin
@@ -3614,11 +4551,16 @@ if(cdRestartCode !== null){
 }
 requestAnimationFrame(gameLoop);
 
-// Decorative background: a few idle enemy sprites drifting behind the home screen,
+// Decorative background: idle enemy sprites drifting behind the home screen,
 // reusing the same draw functions as gameplay (purely visual, no game-state impact).
-const homeBgEnemyPool = ['goblin','skeleton','knight','wolf'];
+const homeBgEnemyPool = [
+    'goblin','skeleton','knight','wolf','siege','wagon',
+    'goblin_scout','goblin_armored','wolf_dire','shade','leshy','wisphawk',
+    'brambletreant','embersalamander','irongolem','bombbeetle','golemsentinel',
+    'rottedrevenant','skyraider','wyvern','stoneburrower','graveworm',
+];
 let homeBgEnemies = homeBgEnemyPool.map((type,i) => ({
-    type, x: 60+i*160+Math.random()*60, y: 100+Math.random()*300,
+    type, x: (i*137)%1100 + Math.random()*60, y: 80+(i*191)%360 + Math.random()*40,
     vx: (Math.random()-0.5)*0.6, vy: (Math.random()-0.5)*0.4,
     dead:false, frozen:0, frame:0, frameTimer:0
 }));
